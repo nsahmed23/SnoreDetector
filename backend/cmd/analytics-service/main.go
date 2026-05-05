@@ -1,19 +1,6 @@
-// sync-service: receives Apple Sign-In, issues session JWTs, and
-// brokers cross-device snore-event sync over Postgres.
+// analytics-service: per-user aggregations over the snore_events table.
 //
-// Configuration is environment-driven (12-factor):
-//
-//   ADDR              listen address, default ":8080"
-//   DATABASE_URL      Postgres connection URL (required)
-//   APPLE_AUDIENCE    iOS bundle ID, default "com.snoreguard.app"
-//   APPLE_ISSUER      JWT iss, default "https://appleid.apple.com"
-//   JWT_SIGNING_KEY   ≥32-byte HS256 key for session tokens (required)
-//   JWT_ISSUER        access token iss, default "snoreguard-sync"
-//   JWT_REFRESH_ISSUER refresh token iss, default "snoreguard-refresh"
-//   JWT_TTL           access token lifetime, default 1h
-//   JWT_REFRESH_TTL   refresh token lifetime, default 1440h (60d)
-//   LOG_LEVEL         debug|info|warn|error, default info
-//   REQUEST_TIMEOUT   per-request timeout, default 15s
+// Read-only — all writes happen through sync-service.
 package main
 
 import (
@@ -28,28 +15,24 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/nsahmed23/SnoreDetector/backend/internal/apple"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/analytics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/config"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
 	otelsetup "github.com/nsahmed23/SnoreDetector/backend/internal/otel"
-	"github.com/nsahmed23/SnoreDetector/backend/internal/server"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
-	"github.com/nsahmed23/SnoreDetector/backend/migrations"
 )
 
-const serviceName = "sync-service"
-
-var Version = "dev"
+const serviceName = "analytics-service"
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("sync-service exited with error", "err", err.Error())
+		slog.Error(serviceName+" exited with error", "err", err.Error())
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	cfg, err := config.LoadSyncService()
+	cfg, err := config.LoadAnalyticsService()
 	if err != nil {
 		return err
 	}
@@ -58,7 +41,7 @@ func run() error {
 	rootCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	otelShutdown, err := otelsetup.Setup(rootCtx, serviceName, Version)
+	otelShutdown, err := otelsetup.Setup(rootCtx, serviceName, version())
 	if err != nil {
 		return err
 	}
@@ -70,19 +53,6 @@ func run() error {
 		}
 	}()
 
-	// Run migrations on a single non-pooled connection.
-	migConn, err := store.AcquireConn(rootCtx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	if err := migrations.Up(rootCtx, migConn); err != nil {
-		_ = migConn.Close(rootCtx)
-		return err
-	}
-	if err := migConn.Close(rootCtx); err != nil {
-		logger.Warn("close migration conn", "err", err.Error())
-	}
-
 	pool, err := store.Connect(rootCtx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -90,32 +60,21 @@ func run() error {
 	defer pool.Close()
 	st := store.New(pool)
 
-	verifier, err := apple.New(rootCtx, cfg.AppleAudience, cfg.AppleIssuer)
-	if err != nil {
-		return err
-	}
-	jwtIss, err := authjwt.NewWithRefresh(
-		cfg.JWTSigningKey,
-		cfg.JWTIssuer,
-		cfg.JWTRefreshIssuer,
-		cfg.JWTTTL,
-		cfg.JWTRefreshTTL,
-	)
+	jwtIss, err := authjwt.New(cfg.JWTSigningKey, cfg.JWTIssuer, cfg.JWTTTL)
 	if err != nil {
 		return err
 	}
 
-	handler := server.New(server.Deps{
+	handler := analytics.New(analytics.Deps{
 		Logger:         logger,
 		Store:          st,
-		Apple:          verifier,
 		JWT:            jwtIss,
 		RequestTimeout: cfg.RequestTimeout,
 	})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           otelhttp.NewHandler(handler, "sync"),
+		Handler:           otelhttp.NewHandler(handler, "analytics"),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       cfg.RequestTimeout + 5*time.Second,
 		WriteTimeout:      cfg.RequestTimeout + 5*time.Second,
@@ -141,6 +100,12 @@ func run() error {
 	defer sCancel()
 	return srv.Shutdown(shutdownCtx)
 }
+
+// version is built-in to the binary at build time via -ldflags.
+// Falls back to "dev" otherwise.
+var Version = "dev"
+
+func version() string { return Version }
 
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level

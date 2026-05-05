@@ -1,9 +1,13 @@
 SHELL := /bin/bash
 
-.PHONY: build vet test test-integration tidy run-sync sqlc lint
+.PHONY: build vet test test-integration tidy run-sync run-analytics run-export sqlc
 
-# Test DB URL — override with TEST_DATABASE_URL=... if you want a different db.
 TEST_DATABASE_URL ?= postgres://snoreguard:dev-only-password@localhost:5432/snoreguard?sslmode=disable
+
+# Shared env block used by every `run-*` target.
+DEV_ENV = JWT_SIGNING_KEY=change-me-to-a-real-32-byte-secret-please-1234567890 \
+          DATABASE_URL=postgres://snoreguard:dev-only-password@localhost:5432/snoreguard?sslmode=disable \
+          LOG_LEVEL=debug
 
 build:
 	mkdir -p bin
@@ -17,20 +21,21 @@ test:
 	go test ./...
 
 # Integration tests. Requires Postgres reachable via $(TEST_DATABASE_URL).
-# Brings up `docker compose up -d postgres` first if you want a local one.
 test-integration:
 	DATABASE_URL=$(TEST_DATABASE_URL) go test -tags=integration ./internal/store/...
 
 tidy:
 	go mod tidy
 
-# Boot the sync-service against the docker-compose Postgres.
+# Boot each service against the docker-compose Postgres.
 run-sync:
-	JWT_SIGNING_KEY=change-me-to-a-real-32-byte-secret-please-1234567890 \
-	DATABASE_URL=postgres://snoreguard:dev-only-password@localhost:5432/snoreguard?sslmode=disable \
-	APPLE_AUDIENCE=com.snoreguard.app \
-	LOG_LEVEL=debug \
-	go run ./cmd/sync-service
+	$(DEV_ENV) APPLE_AUDIENCE=com.snoreguard.app go run ./cmd/sync-service
+
+run-analytics:
+	$(DEV_ENV) ADDR=:8081 go run ./cmd/analytics-service
+
+run-export:
+	$(DEV_ENV) ADDR=:8082 go run ./cmd/export-service
 
 # Regenerate hand-rolled queries from sqlc/queries.sql when you have
 # `sqlc` installed. The generated code is committed.

@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
 
@@ -34,29 +36,29 @@ type tokenResponse struct {
 func (h *authHandler) handle(w http.ResponseWriter, r *http.Request) {
 	var req appleSignInRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		httpkit.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if req.IdentityToken == "" {
-		writeError(w, http.StatusBadRequest, "identity_token is required")
+		httpkit.Error(w, http.StatusBadRequest, "identity_token is required")
 		return
 	}
 	if h.deps.Apple == nil || h.deps.JWT == nil || h.deps.Store == nil {
-		writeError(w, http.StatusInternalServerError, "auth not configured")
+		httpkit.Error(w, http.StatusInternalServerError, "auth not configured")
 		return
 	}
 
 	id, err := h.deps.Apple.Verify(req.IdentityToken)
 	if err != nil {
 		h.deps.Logger.Warn("apple verify failed", "err", err.Error())
-		writeError(w, http.StatusUnauthorized, "identity token rejected")
+		httpkit.Error(w, http.StatusUnauthorized, "identity token rejected")
 		return
 	}
 
 	user, err := h.deps.Store.UpsertUser(r.Context(), id.Subject, id.Email, id.IsPrivateEmail)
 	if err != nil {
 		h.deps.Logger.Error("upsert user failed", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to record user")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to record user")
 		return
 	}
 
@@ -65,10 +67,10 @@ func (h *authHandler) handle(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.issueTokenPair(r, user.ID, familyID)
 	if err != nil {
 		h.deps.Logger.Error("issue tokens", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to issue session")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to issue session")
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpkit.JSON(w, http.StatusOK, resp)
 }
 
 type refreshRequest struct {
@@ -82,51 +84,51 @@ type refreshRequest struct {
 func (h *authHandler) refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		httpkit.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if req.RefreshToken == "" {
-		writeError(w, http.StatusBadRequest, "refresh_token is required")
+		httpkit.Error(w, http.StatusBadRequest, "refresh_token is required")
 		return
 	}
 	if h.deps.JWT == nil || h.deps.Store == nil {
-		writeError(w, http.StatusInternalServerError, "auth not configured")
+		httpkit.Error(w, http.StatusInternalServerError, "auth not configured")
 		return
 	}
 
 	claims, err := h.deps.JWT.VerifyRefresh(req.RefreshToken)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		httpkit.Error(w, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 	userID, err := uuid.Parse(claims.UserID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		httpkit.Error(w, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 	familyID, err := uuid.Parse(claims.FamilyID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		httpkit.Error(w, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 	tokenID, err := uuid.Parse(claims.ID)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid refresh token")
+		httpkit.Error(w, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 
 	row, err := h.deps.Store.GetRefreshToken(r.Context(), tokenID)
 	if err != nil {
 		if errors.Is(err, store.ErrRefreshNotFound) {
-			writeError(w, http.StatusUnauthorized, "refresh token unknown")
+			httpkit.Error(w, http.StatusUnauthorized, "refresh token unknown")
 			return
 		}
 		h.deps.Logger.Error("get refresh token", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "auth check failed")
+		httpkit.Error(w, http.StatusInternalServerError, "auth check failed")
 		return
 	}
 	if row.RevokedAt != nil {
-		writeError(w, http.StatusUnauthorized, "refresh token revoked")
+		httpkit.Error(w, http.StatusUnauthorized, "refresh token revoked")
 		return
 	}
 	if row.ReplacedBy != nil {
@@ -139,7 +141,7 @@ func (h *authHandler) refresh(w http.ResponseWriter, r *http.Request) {
 			h.deps.Logger.Warn("refresh-token reuse detected; family revoked",
 				"user", userID.String(), "family", familyID.String())
 		}
-		writeError(w, http.StatusUnauthorized, "refresh token reuse detected")
+		httpkit.Error(w, http.StatusUnauthorized, "refresh token reuse detected")
 		return
 	}
 
@@ -147,28 +149,28 @@ func (h *authHandler) refresh(w http.ResponseWriter, r *http.Request) {
 	newAccess, _, accessExp, err := h.deps.JWT.IssueAccess(userID)
 	if err != nil {
 		h.deps.Logger.Error("issue access", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to issue session")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to issue session")
 		return
 	}
 	newRefresh, newRefreshID, refreshExp, err := h.deps.JWT.IssueRefresh(userID, familyID)
 	if err != nil {
 		h.deps.Logger.Error("issue refresh", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to issue session")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to issue session")
 		return
 	}
 	if err := h.deps.Store.ReplaceRefreshToken(r.Context(), tokenID, newRefreshID, userID, familyID, refreshExp); err != nil {
 		if errors.Is(err, store.ErrAlreadyRotated) {
 			// A racing /auth/refresh won — treat as theft response.
 			_ = h.deps.Store.RevokeRefreshFamily(r.Context(), userID, familyID)
-			writeError(w, http.StatusUnauthorized, "refresh token reuse detected")
+			httpkit.Error(w, http.StatusUnauthorized, "refresh token reuse detected")
 			return
 		}
 		h.deps.Logger.Error("replace refresh token", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to rotate session")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to rotate session")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, tokenResponse{
+	httpkit.JSON(w, http.StatusOK, tokenResponse{
 		UserID:                userID.String(),
 		AccessToken:           newAccess,
 		AccessTokenExpiresAt:  accessExp,
@@ -185,12 +187,12 @@ type logoutRequest struct {
 // supplied) the entire refresh-token family. Requires a valid access
 // token in the Authorization header.
 func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
-	uid, ok := UserIDFrom(r.Context())
+	uid, ok := auth.UserIDFrom(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	jti, _ := JTIFrom(r.Context())
+	jti, _ := auth.JTIFrom(r.Context())
 
 	var req logoutRequest
 	// Body is optional — clients without a refresh token can still
@@ -202,7 +204,7 @@ func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
 	if jti != "" {
 		if err := h.deps.Store.RecordRevokedJTI(r.Context(), jti, uid); err != nil {
 			h.deps.Logger.Error("revoke jti", "err", err.Error())
-			writeError(w, http.StatusInternalServerError, "logout failed")
+			httpkit.Error(w, http.StatusInternalServerError, "logout failed")
 			return
 		}
 	}
@@ -219,7 +221,7 @@ func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+	httpkit.JSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
 
 // issueTokenPair mints a fresh access + refresh pair for the given

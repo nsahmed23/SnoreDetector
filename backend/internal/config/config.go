@@ -9,6 +9,38 @@ import (
 	"time"
 )
 
+// shared groups the env-driven fields that every backend service
+// needs. Service-specific configs embed it.
+type shared struct {
+	Addr           string
+	DatabaseURL    string
+	JWTSigningKey  []byte
+	JWTIssuer      string
+	JWTTTL         time.Duration
+	LogLevel       string
+	RequestTimeout time.Duration
+}
+
+func loadShared(defaultAddr string) (*shared, []error) {
+	s := &shared{
+		Addr:           getenv("ADDR", defaultAddr),
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		JWTSigningKey:  []byte(os.Getenv("JWT_SIGNING_KEY")),
+		JWTIssuer:      getenv("JWT_ISSUER", "snoreguard-sync"),
+		LogLevel:       getenv("LOG_LEVEL", "info"),
+		RequestTimeout: getDuration("REQUEST_TIMEOUT", 15*time.Second),
+		JWTTTL:         getDuration("JWT_TTL", 1*time.Hour),
+	}
+	var errs []error
+	if s.DatabaseURL == "" {
+		errs = append(errs, errors.New("DATABASE_URL is required"))
+	}
+	if len(s.JWTSigningKey) < 32 {
+		errs = append(errs, errors.New("JWT_SIGNING_KEY must be at least 32 bytes"))
+	}
+	return s, errs
+}
+
 type SyncService struct {
 	Addr             string
 	DatabaseURL      string
@@ -23,27 +55,40 @@ type SyncService struct {
 	RequestTimeout   time.Duration
 }
 
+type AnalyticsService struct {
+	Addr           string
+	DatabaseURL    string
+	JWTSigningKey  []byte
+	JWTIssuer      string
+	JWTTTL         time.Duration
+	LogLevel       string
+	RequestTimeout time.Duration
+}
+
+type ExportService struct {
+	Addr           string
+	DatabaseURL    string
+	JWTSigningKey  []byte
+	JWTIssuer      string
+	JWTTTL         time.Duration
+	LogLevel       string
+	RequestTimeout time.Duration
+}
+
 func LoadSyncService() (*SyncService, error) {
+	s, errs := loadShared(":8080")
 	cfg := &SyncService{
-		Addr:             getenv("ADDR", ":8080"),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		Addr:             s.Addr,
+		DatabaseURL:      s.DatabaseURL,
 		AppleAudience:    getenv("APPLE_AUDIENCE", "com.snoreguard.app"),
 		AppleIssuer:      getenv("APPLE_ISSUER", "https://appleid.apple.com"),
-		JWTSigningKey:    []byte(os.Getenv("JWT_SIGNING_KEY")),
-		JWTIssuer:        getenv("JWT_ISSUER", "snoreguard-sync"),
+		JWTSigningKey:    s.JWTSigningKey,
+		JWTIssuer:        s.JWTIssuer,
 		JWTRefreshIssuer: getenv("JWT_REFRESH_ISSUER", "snoreguard-refresh"),
-		LogLevel:         getenv("LOG_LEVEL", "info"),
-		RequestTimeout:   getDuration("REQUEST_TIMEOUT", 15*time.Second),
-		JWTTTL:           getDuration("JWT_TTL", 1*time.Hour),
+		JWTTTL:           s.JWTTTL,
 		JWTRefreshTTL:    getDuration("JWT_REFRESH_TTL", 60*24*time.Hour),
-	}
-
-	var errs []error
-	if cfg.DatabaseURL == "" {
-		errs = append(errs, errors.New("DATABASE_URL is required"))
-	}
-	if len(cfg.JWTSigningKey) < 32 {
-		errs = append(errs, errors.New("JWT_SIGNING_KEY must be at least 32 bytes"))
+		LogLevel:         s.LogLevel,
+		RequestTimeout:   s.RequestTimeout,
 	}
 	if cfg.AppleAudience == "" {
 		errs = append(errs, errors.New("APPLE_AUDIENCE is required"))
@@ -55,6 +100,38 @@ func LoadSyncService() (*SyncService, error) {
 		return nil, errors.Join(errs...)
 	}
 	return cfg, nil
+}
+
+func LoadAnalyticsService() (*AnalyticsService, error) {
+	s, errs := loadShared(":8081")
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return &AnalyticsService{
+		Addr:           s.Addr,
+		DatabaseURL:    s.DatabaseURL,
+		JWTSigningKey:  s.JWTSigningKey,
+		JWTIssuer:      s.JWTIssuer,
+		JWTTTL:         s.JWTTTL,
+		LogLevel:       s.LogLevel,
+		RequestTimeout: s.RequestTimeout,
+	}, nil
+}
+
+func LoadExportService() (*ExportService, error) {
+	s, errs := loadShared(":8082")
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return &ExportService{
+		Addr:           s.Addr,
+		DatabaseURL:    s.DatabaseURL,
+		JWTSigningKey:  s.JWTSigningKey,
+		JWTIssuer:      s.JWTIssuer,
+		JWTTTL:         s.JWTTTL,
+		LogLevel:       s.LogLevel,
+		RequestTimeout: s.RequestTimeout,
+	}, nil
 }
 
 func getenv(key, fallback string) string {

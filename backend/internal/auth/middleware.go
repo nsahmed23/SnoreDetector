@@ -1,4 +1,7 @@
-package server
+// Package auth holds the bearer-token middleware shared by every
+// service. It depends only on the session-token verifier, not on
+// chi or any service-specific shape.
+package auth
 
 import (
 	"context"
@@ -8,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
 )
 
@@ -18,43 +22,44 @@ const (
 	ctxKeyJTI
 )
 
-// jtiChecker is the subset of Store the auth middleware needs to
+// JTIStore is the subset of Store the auth middleware needs to
 // short-circuit on revoked access tokens. We accept an interface
 // (rather than the full Store) so tests that don't exercise revocation
 // can pass nil.
-type jtiChecker interface {
+type JTIStore interface {
 	IsJTIRevoked(ctx context.Context, jti string) (bool, error)
 }
 
-// AuthMiddleware enforces a valid Bearer token and stashes the user
-// ID + JTI on the request context. If `revoked` is non-nil it is
-// consulted on every request; a 401 is returned for revoked JTIs.
-func AuthMiddleware(iss *authjwt.Issuer, revoked jtiChecker) func(http.Handler) http.Handler {
+// Middleware enforces a valid Bearer session JWT and stashes the
+// decoded user ID + JTI on the request context. If `revoked` is
+// non-nil it is consulted on every request; a 401 is returned for
+// revoked JTIs.
+func Middleware(iss *authjwt.Issuer, revoked JTIStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tok, err := bearerToken(r)
 			if err != nil {
-				writeError(w, http.StatusUnauthorized, "missing or malformed Authorization header")
+				httpkit.Error(w, http.StatusUnauthorized, "missing or malformed Authorization header")
 				return
 			}
 			claims, err := iss.VerifyAccess(tok)
 			if err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid session token")
+				httpkit.Error(w, http.StatusUnauthorized, "invalid session token")
 				return
 			}
 			uid, err := uuid.Parse(claims.UserID)
 			if err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid session token")
+				httpkit.Error(w, http.StatusUnauthorized, "invalid session token")
 				return
 			}
 			if revoked != nil && claims.ID != "" {
 				gone, err := revoked.IsJTIRevoked(r.Context(), claims.ID)
 				if err != nil {
-					writeError(w, http.StatusInternalServerError, "auth check failed")
+					httpkit.Error(w, http.StatusInternalServerError, "auth check failed")
 					return
 				}
 				if gone {
-					writeError(w, http.StatusUnauthorized, "session revoked")
+					httpkit.Error(w, http.StatusUnauthorized, "session revoked")
 					return
 				}
 			}
@@ -66,7 +71,7 @@ func AuthMiddleware(iss *authjwt.Issuer, revoked jtiChecker) func(http.Handler) 
 }
 
 // UserIDFrom returns the authenticated user ID for a request, or
-// uuid.Nil + false if the middleware didn't authenticate it.
+// uuid.Nil + false if the middleware didn't run for the request.
 func UserIDFrom(ctx context.Context) (uuid.UUID, bool) {
 	u, ok := ctx.Value(ctxKeyUserID).(uuid.UUID)
 	return u, ok

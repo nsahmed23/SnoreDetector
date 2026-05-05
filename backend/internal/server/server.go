@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
@@ -13,6 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/apple"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
@@ -59,7 +60,6 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(d.RequestTimeout))
-	r.Use(jsonContentType)
 
 	r.Get("/healthz", healthHandler(d))
 
@@ -68,7 +68,7 @@ func New(d Deps) http.Handler {
 	r.Post("/auth/refresh", authH.refresh)
 
 	r.Group(func(r chi.Router) {
-		r.Use(AuthMiddleware(d.JWT, d.Store))
+		r.Use(auth.Middleware(d.JWT, d.Store))
 		r.Post("/auth/logout", authH.logout)
 		evH := &eventsHandler{deps: d}
 		r.Post("/events", evH.create)
@@ -85,26 +85,10 @@ func healthHandler(d Deps) http.HandlerFunc {
 			if err := d.Store.Ping(r.Context()); err != nil {
 				status["status"] = "degraded"
 				status["db_error"] = err.Error()
-				writeJSON(w, http.StatusServiceUnavailable, status)
+				httpkit.JSON(w, http.StatusServiceUnavailable, status)
 				return
 			}
 		}
-		writeJSON(w, http.StatusOK, status)
+		httpkit.JSON(w, http.StatusOK, status)
 	}
-}
-
-func jsonContentType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

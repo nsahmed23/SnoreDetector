@@ -325,6 +325,95 @@ func (s *Store) IsJTIRevoked(ctx context.Context, jti string) (bool, error) {
 	return true, nil
 }
 
+// DailySummary is one row of a per-day aggregation, in the user's
+// configured time zone (which the analytics service passes in).
+type DailySummary struct {
+	Day             time.Time
+	EventCount      int64
+	TotalDurationMS int64
+	AvgDB           float64
+	LongestMS       int32
+}
+
+// DailySummaries returns per-day aggregations between [start, end].
+// `tz` is an IANA timezone name (e.g. "America/Los_Angeles") used to
+// bucket events into local-day rows. Pass "UTC" for UTC days.
+func (s *Store) DailySummaries(
+	ctx context.Context,
+	userID uuid.UUID,
+	tz string,
+	start, end time.Time,
+) ([]DailySummary, error) {
+	if tz == "" {
+		tz = "UTC"
+	}
+	const q = `
+SELECT (started_at AT TIME ZONE $4)::date AS day,
+       COUNT(*)::bigint        AS event_count,
+       COALESCE(SUM(duration_ms), 0)::bigint AS total_ms,
+       COALESCE(AVG(avg_db), 0)::double precision AS avg_db,
+       COALESCE(MAX(duration_ms), 0)::int AS longest_ms
+FROM snore_events
+WHERE user_id = $1 AND started_at >= $2 AND started_at < $3
+GROUP BY day
+ORDER BY day ASC;
+`
+	rows, err := s.pool.Query(ctx, q, userID, start, end, tz)
+	if err != nil {
+		return nil, fmt.Errorf("store: daily summaries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DailySummary
+	for rows.Next() {
+		var d DailySummary
+		if err := rows.Scan(&d.Day, &d.EventCount, &d.TotalDurationMS, &d.AvgDB, &d.LongestMS); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// Totals is the all-time-or-since rollup used by the analytics
+// /totals endpoint.
+type Totals struct {
+	EventCount      int64
+	TotalDurationMS int64
+	AvgDB           float64
+	LongestMS       int32
+	FirstEventAt    *time.Time
+	LastEventAt     *time.Time
+}
+
+// TotalsSince returns aggregate stats for all events with started_at
+// after `since`. Pass time.Time{} for "all time".
+func (s *Store) TotalsSince(
+	ctx context.Context,
+	userID uuid.UUID,
+	since time.Time,
+) (*Totals, error) {
+	const q = `
+SELECT COUNT(*)::bigint                              AS event_count,
+       COALESCE(SUM(duration_ms), 0)::bigint         AS total_ms,
+       COALESCE(AVG(avg_db), 0)::double precision    AS avg_db,
+       COALESCE(MAX(duration_ms), 0)::int            AS longest_ms,
+       MIN(started_at)                               AS first_at,
+       MAX(started_at)                               AS last_at
+FROM snore_events
+WHERE user_id = $1 AND started_at >= $2;
+`
+	row := s.pool.QueryRow(ctx, q, userID, since)
+	t := &Totals{}
+	var first, last *time.Time
+	if err := row.Scan(&t.EventCount, &t.TotalDurationMS, &t.AvgDB, &t.LongestMS, &first, &last); err != nil {
+		return nil, fmt.Errorf("store: totals: %w", err)
+	}
+	t.FirstEventAt = first
+	t.LastEventAt = last
+	return t, nil
+}
+
 // Ping verifies connectivity. Used by /healthz.
 func (s *Store) Ping(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)

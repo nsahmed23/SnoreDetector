@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
 
@@ -39,22 +41,22 @@ type createEventsResponse struct {
 }
 
 func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
-	uid, ok := UserIDFrom(r.Context())
+	uid, ok := auth.UserIDFrom(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
 	var req createEventsRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		httpkit.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if len(req.Events) == 0 {
-		writeError(w, http.StatusBadRequest, "events array is empty")
+		httpkit.Error(w, http.StatusBadRequest, "events array is empty")
 		return
 	}
 	if len(req.Events) > maxEventsPerRequest {
-		writeError(w, http.StatusBadRequest, "too many events in one request")
+		httpkit.Error(w, http.StatusBadRequest, "too many events in one request")
 		return
 	}
 
@@ -64,7 +66,7 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 	rows := make([]store.SnoreEvent, 0, len(req.Events))
 	for i, e := range req.Events {
 		if err := validateEvent(e); err != nil {
-			writeError(w, http.StatusBadRequest,
+			httpkit.Error(w, http.StatusBadRequest,
 				fmt.Sprintf("event[%d]: %v", i, err))
 			return
 		}
@@ -81,11 +83,11 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 	inserted, err := h.deps.Store.InsertEvents(r.Context(), uid, rows)
 	if err != nil {
 		h.deps.Logger.Error("insert events", "err", err.Error(), "user", uid.String())
-		writeError(w, http.StatusInternalServerError, "failed to record events")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to record events")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, createEventsResponse{
+	httpkit.JSON(w, http.StatusOK, createEventsResponse{
 		Inserted: inserted,
 		Received: len(req.Events),
 	})
@@ -100,16 +102,16 @@ type listEventsResponse struct {
 }
 
 func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
-	uid, ok := UserIDFrom(r.Context())
+	uid, ok := auth.UserIDFrom(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthenticated")
+		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
 
 	q := r.URL.Query()
 	cursor, err := resolveCursor(q.Get("cursor"), q.Get("since"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		httpkit.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -117,7 +119,7 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 	if l := q.Get("limit"); l != "" {
 		n, err := strconv.Atoi(l)
 		if err != nil || n <= 0 || n > 1000 {
-			writeError(w, http.StatusBadRequest, "invalid 'limit' (1..1000)")
+			httpkit.Error(w, http.StatusBadRequest, "invalid 'limit' (1..1000)")
 			return
 		}
 		limit = n
@@ -126,7 +128,7 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.deps.Store.ListEvents(r.Context(), uid, cursor, limit)
 	if err != nil {
 		h.deps.Logger.Error("list events", "err", err.Error())
-		writeError(w, http.StatusInternalServerError, "failed to list events")
+		httpkit.Error(w, http.StatusInternalServerError, "failed to list events")
 		return
 	}
 
@@ -147,7 +149,7 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 		last := rows[len(rows)-1]
 		resp.NextCursor = encodeCursor(store.Cursor{ReceivedAt: last.ReceivedAt, ID: last.ID})
 	}
-	writeJSON(w, http.StatusOK, resp)
+	httpkit.JSON(w, http.StatusOK, resp)
 }
 
 // resolveCursor picks between the opaque `cursor` param and the legacy
