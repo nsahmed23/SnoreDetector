@@ -1,0 +1,26 @@
+[package]
+name = "snoreguard-core"
+version = "0.1.0"
+edition = "2021"
+description = "SnoreGuard heuristic snore detection core (FFT energy + low-frequency dominance)."
+license = "MIT"
+publish = false
+
+[lib]
+name = "snoreguard_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+rustfft = "6.2"
+
+[build-dependencies]
+cbindgen = "0.27"
+
+[dev-dependencies]
+proptest = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
