@@ -6,53 +6,81 @@
 [![Web prototype](https://github.com/nsahmed23/SnoreDetector/actions/workflows/web.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/web.yml)
 [![iOS app](https://github.com/nsahmed23/SnoreDetector/actions/workflows/ios.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/ios.yml)
 
-A smart, mobile-first snore monitoring application prototype built with React, TypeScript, and Tailwind CSS. SnoreGuard intelligently tracks your snoring while ignoring background noises like audiobooks or fans, integrates with Apple HealthKit, and provides rich insights into your sleep habits.
+A mobile-first snore monitoring app. The current repo contains a polished React
+prototype that doubles as the **visual product spec** for the native iOS build.
+The real product is a Swift app with a Rust algorithm core and Go backend
+services — see [`docs/NATIVE_IOS_PORT_PLAN.md`](docs/NATIVE_IOS_PORT_PLAN.md).
 
-## 🌟 Features
+> **Not a medical device.** SnoreGuard is a wellness prototype. It does not
+> diagnose sleep apnea or any sleep disorder. See
+> [`docs/DISCLAIMER.md`](docs/DISCLAIMER.md).
 
-* **Smart Snore Detection**: Uses real-time audio analysis (FFT) with adjustable volume thresholds and sensitivity levels. Designed to differentiate between actual snoring and background noise (like Audible or Spotify playing on AirPods).
-* **Apple HealthKit Sync**: Mocks the capability to read sleep stages (Awake, Light, Deep, REM) and writes the total duration and average intensity of nightly snoring events back to Apple Health.
-* **Live Sleep & Audio Monitoring**: Features a beautiful, interactive recording interface with real-time decibel meters, duration tracking, and live sleep stage plotting on the daily chart.
-* **Rich Analytics & Insights**: 
-  * View daily, weekly, and monthly trends using `recharts`.
-  * Snoring events are color-coded and mapped directly over your sleep stages to show exactly when you snore the most.
-* **Audio Playback**: Review audio clips of your snoring events, neatly categorized by the sleep stage they occurred in.
-* **Data Export**: Export your snoring records to a CSV file (Last 7 days, 30 days, or custom ranges) for personal records or to share with a doctor.
-* **Interactive Onboarding**: A brief, polished tutorial welcomes new users and explains core capabilities.
+## Features (prototype)
 
-## 🚀 Getting Started
+* **Snore detection** — tracks via a frequency-aware heuristic (FFT energy +
+  low-frequency dominance + sustained-frame counter) with adjustable threshold
+  and sensitivity. *(Heuristic detector — not ML.)* Designed to ignore
+  audiobooks and broadband background noise.
+* **HealthKit sync (mocked)** — toggles for reading Sleep Stages and writing
+  nightly snoring duration / average intensity. Real `HKHealthStore` integration
+  arrives in the native iOS app.
+* **Live monitoring** — recording interface with real-time decibel meter,
+  threshold marker, ripple visualizer, and live session stats.
+* **Analytics** — daily / weekly / monthly trends rendered with `recharts`,
+  with snore events overlaid on the sleep-stage chart.
+* **Audio playback** — review snore clips grouped by sleep stage (mocked in the
+  prototype).
+* **CSV export** — last 7 / 30 days or custom range.
+* **Onboarding** — three-step intro modal.
 
-### Prerequisites
-Make sure you have Node.js and npm installed.
+## Repository layout
 
-### Installation
+```
+SnoreDetector/
+├── src/         React prototype (visual product spec)
+├── docs/        PRODUCT_SPEC.md, NATIVE_IOS_PORT_PLAN.md, DISCLAIMER.md
+├── ios/         Native iOS Swift app (stub — see port plan, phase 2)
+├── rust-core/   Rust algorithm core (stub — see port plan, phase 1)
+└── backend/     Go services (stub — see port plan, phases 4–5)
+```
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/nsahmed23/SnoreDetector.git
-   cd SnoreDetector
-   ```
+## Documents
 
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+- [`docs/PRODUCT_SPEC.md`](docs/PRODUCT_SPEC.md) — feature-by-feature mapping
+  from the web prototype to native iOS equivalents.
+- [`docs/NATIVE_IOS_PORT_PLAN.md`](docs/NATIVE_IOS_PORT_PLAN.md) — Swift app
+  layout, Rust core build (cargo + cbindgen + xcframework), Swift ↔ Rust C FFI
+  boundary, Go backend services, phasing.
+- [`docs/DISCLAIMER.md`](docs/DISCLAIMER.md) — privacy and not-a-medical-device
+  notice.
 
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
+## Running the prototype
 
-4. Open your browser and navigate to `http://localhost:3000`. To experience the mobile-first design best, view it on a mobile device or toggle your browser's developer tools to mobile view.
+```bash
+npm install
+npm run dev
+# open http://localhost:3000 — best viewed in a mobile viewport
+```
 
-## 🛠 Tech Stack
+`npm run lint` runs `tsc --noEmit`.
 
-* **Frontend Framework**: React 19, TypeScript, Vite
-* **Styling**: Tailwind CSS v4, Lucide React (Icons)
-* **Data Visualization**: Recharts
-* **Audio Processing**: Web Audio API (AudioContext interface for real-time frequency analysis)
+## Tech stack (prototype)
 
-## 📱 iOS Context Note
+- React 19, TypeScript, Vite 6
+- Tailwind CSS v4, Lucide icons
+- Recharts for charts
+- Web Audio API (`AudioContext` + `AnalyserNode`) for real-time FFT capture
 
-While this is a web-based prototype, it is designed with iOS mechanics in mind:
-* The recording functionality assumes the use of `AVAudioSession` with the `mixWithOthers` category on a native iOS build, allowing users to listen to audiobooks via AirPods while the app silently monitors background audio using the microphone.
+## Branch protocol
+
+- Web prototype changes go to `main` via short-lived branches.
+- Native work lands in feature branches scoped to a single phase
+  (`rust-core-skeleton`, `ios-record-tab`, `ios-healthkit`, `backend-sync`,
+  `backend-analytics-export`).
+
+## iOS context note
+
+The prototype is designed with iOS mechanics in mind: the recording flow
+assumes `AVAudioSession` configured with `.playAndRecord` and `.mixWithOthers`,
+so the user can keep an audiobook playing on AirPods while the app monitors
+ambient audio. The native app is where this actually happens.
