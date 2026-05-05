@@ -1,0 +1,44 @@
+# Local-dev compose for the SnoreGuard backend.
+#
+#   docker compose up -d           # postgres only
+#   docker compose --profile app up # postgres + sync-service
+#
+# Healthcheck on Postgres ensures the app waits for the DB to be ready
+# before booting.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: snoreguard
+      POSTGRES_PASSWORD: dev-only-password
+      POSTGRES_DB: snoreguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snoreguard -d snoreguard"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  sync-service:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: sync-service/Dockerfile
+    environment:
+      ADDR: ":8080"
+      DATABASE_URL: postgres://snoreguard:dev-only-password@postgres:5432/snoreguard?sslmode=disable
+      JWT_SIGNING_KEY: change-me-to-a-real-32-byte-secret-please-1234567890
+      APPLE_AUDIENCE: com.snoreguard.app
+      LOG_LEVEL: debug
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

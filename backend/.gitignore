@@ -1,0 +1,13 @@
+# Build output
+/bin/
+/sync-service/sync-service
+/cmd/sync-service/sync-service
+
+# Local env files (never commit secrets)
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
