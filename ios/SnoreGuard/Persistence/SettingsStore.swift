@@ -16,11 +16,20 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(hasAcceptedDisclaimer, forKey: Keys.disclaimer) }
     }
 
+    /// User-facing toggle for HealthKit sync. The actual permission
+    /// status lives on HKHealthStore — this value only reflects
+    /// the user's intent. RecorderViewModel checks
+    /// `HealthRecorder.isWriteAuthorized` before each write.
+    @Published var syncToAppleHealth: Bool {
+        didSet { defaults.set(syncToAppleHealth, forKey: Keys.healthSync) }
+    }
+
     private let defaults: UserDefaults
     private enum Keys {
         static let threshold = "settings.thresholdDB"
         static let sensitivity = "settings.sensitivity"
         static let disclaimer = "settings.hasAcceptedDisclaimer"
+        static let healthSync = "settings.syncToAppleHealth"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -39,6 +48,7 @@ final class SettingsStore: ObservableObject {
 
         self.settings = DetectorSettings(thresholdDB: threshold, sensitivity: sensitivity)
         self.hasAcceptedDisclaimer = defaults.bool(forKey: Keys.disclaimer)
+        self.syncToAppleHealth = defaults.bool(forKey: Keys.healthSync)
     }
 
     private func persist() {

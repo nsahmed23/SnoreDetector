@@ -48,11 +48,26 @@ targets:
           SnoreGuard listens to ambient audio while you sleep so it can
           flag possible snoring. Audio is processed entirely on-device
           and never recorded or uploaded.
+        # HealthKit (phase 3): writing the noise level during snore
+        # events as audio-exposure samples, reading sleep stages so
+        # phase-5 analytics can correlate. Both are opt-in via the
+        # Settings toggle and the system-level Health permission sheet.
+        NSHealthShareUsageDescription: >-
+          SnoreGuard reads your sleep stages from Apple Health so
+          future analytics can correlate snore events with how soundly
+          you slept. Reading is optional — toggle it off in Settings
+          at any time.
+        NSHealthUpdateUsageDescription: >-
+          When you opt in, SnoreGuard writes the average noise level
+          during each snore event to Apple Health as an
+          audio-exposure sample. The values are not calibrated SPL —
+          treat them as relative, not absolute decibels.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.snoreguard.app
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
+        CODE_SIGN_ENTITLEMENTS: SnoreGuard/SnoreGuard.entitlements
         # Path is relative to the .xcodeproj. The xcframework is
         # built by `rust-core/scripts/build-xcframework.sh` (phase 1)
         # and is intentionally NOT committed — see ios/README.md.

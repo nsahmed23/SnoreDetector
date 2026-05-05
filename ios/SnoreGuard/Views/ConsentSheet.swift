@@ -25,6 +25,7 @@ struct ConsentSheet: View {
                     bullet("All audio processing happens on your device. Audio is never recorded or uploaded.")
                     bullet("False positives and false negatives are expected. Persistent loud snoring, gasping, or pauses in breathing should be discussed with a clinician.")
                     bullet("To listen continuously, the app needs microphone access.")
+                    bullet("Apple Health sync is optional and off by default. If you turn it on in Settings, snore events are written as audio-exposure samples — the dB values are not calibrated SPL, so treat them as relative.")
 
                     Spacer(minLength: 24)
 

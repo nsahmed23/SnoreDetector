@@ -31,6 +31,7 @@ final class RecorderViewModel: ObservableObject {
     private let log = Logger(subsystem: "com.snoreguard.app", category: "Recorder")
     private let settingsStore: SettingsStore
     private let engine: AudioEngine
+    private let healthRecorder: HealthRecorder
     private var core: SnoreCore?
     private var pollTimer: AnyCancellable?
     private var settingsCancellable: AnyCancellable?
@@ -46,9 +47,11 @@ final class RecorderViewModel: ObservableObject {
     private var engineDelegateProxy: AudioEngineProxy?
 
     init(settingsStore: SettingsStore,
-         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize)) {
+         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize),
+         healthRecorder: HealthRecorder = HealthStore()) {
         self.settingsStore = settingsStore
         self.engine = engine
+        self.healthRecorder = healthRecorder
 
         // Forward live settings changes into the running detector.
         self.settingsCancellable = settingsStore.$settings
@@ -146,6 +149,15 @@ final class RecorderViewModel: ObservableObject {
         while let ev = core.pollEvent() {
             session?.events.append(ev)
             eventCount += 1
+            forwardToHealthIfEnabled(ev)
+        }
+    }
+
+    private func forwardToHealthIfEnabled(_ ev: SnoreEvent) {
+        guard settingsStore.syncToAppleHealth,
+              let session = session else { return }
+        Task.detached { [healthRecorder, session] in
+            await healthRecorder.record(event: ev, sessionStartedAt: session.startedAt)
         }
     }
 

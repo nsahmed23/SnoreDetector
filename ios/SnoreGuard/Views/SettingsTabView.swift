@@ -1,13 +1,13 @@
 // SettingsTabView.swift
 //
 // Mirrors the React `SettingsTab`: threshold slider, sensitivity
-// picker, and the disclaimer reminder. HealthKit toggle lands in
-// phase 3.
+// picker, HealthKit toggle, and the disclaimer reminder.
 
 import SwiftUI
 
 struct SettingsTabView: View {
     @EnvironmentObject var store: SettingsStore
+    @StateObject private var health = HealthAuthorizationModel()
 
     var body: some View {
         Form {
@@ -47,6 +47,38 @@ struct SettingsTabView: View {
                 .pickerStyle(.menu)
             }
 
+            Section {
+                Toggle("Sync to Apple Health", isOn: Binding(
+                    get: { store.syncToAppleHealth },
+                    set: { newValue in
+                        if newValue && !health.isAuthorized {
+                            // Optimistically toggle on; if the user
+                            // denies, we'll flip it back.
+                            store.syncToAppleHealth = true
+                            Task {
+                                let granted = await health.requestAuthorization()
+                                if !granted {
+                                    store.syncToAppleHealth = false
+                                }
+                            }
+                        } else {
+                            store.syncToAppleHealth = newValue
+                        }
+                    }
+                ))
+                .disabled(!health.isAvailable)
+
+                Text(health.statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Apple Health")
+            } footer: {
+                if store.syncToAppleHealth {
+                    Text("Snore events are written as audio-exposure samples (uncalibrated dB). Disable any time to stop new writes — existing samples stay in Health unless you delete them in the Health app.")
+                }
+            }
+
             Section("About") {
                 LabeledContent("Version", value: Bundle.main.shortVersionString)
                 LabeledContent("Build", value: Bundle.main.buildNumber)
@@ -55,6 +87,48 @@ struct SettingsTabView: View {
             }
         }
         .navigationTitle("Settings")
+        .task { await health.refresh() }
+    }
+}
+
+/// Wraps HealthRecorder so the SwiftUI view can react to permission
+/// changes without owning HKHealthStore directly.
+@MainActor
+final class HealthAuthorizationModel: ObservableObject {
+    @Published private(set) var isAvailable = false
+    @Published private(set) var isAuthorized = false
+
+    private let recorder: HealthRecorder
+
+    init(recorder: HealthRecorder = HealthStore()) {
+        self.recorder = recorder
+    }
+
+    var statusText: String {
+        if !isAvailable {
+            return "HealthKit isn't available on this device."
+        }
+        return isAuthorized
+            ? "Write permission granted."
+            : "Toggle on to grant write permission."
+    }
+
+    func refresh() async {
+        isAvailable = recorder.isAvailable
+        isAuthorized = recorder.isWriteAuthorized
+    }
+
+    /// Returns `true` if the user granted (or had previously granted)
+    /// write permission.
+    func requestAuthorization() async -> Bool {
+        do {
+            try await recorder.requestAuthorization()
+        } catch {
+            isAuthorized = false
+            return false
+        }
+        isAuthorized = recorder.isWriteAuthorized
+        return isAuthorized
     }
 }
 
