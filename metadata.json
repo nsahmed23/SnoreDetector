@@ -1,0 +1,8 @@
+{
+  "name": "SnoreGuard Prototype",
+  "description": "A prototype of a snore tracking application with live audio monitoring and sleep insights.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
