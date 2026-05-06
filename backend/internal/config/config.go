@@ -56,10 +56,12 @@ type SyncService struct {
 	RequestTimeout   time.Duration
 
 	// Phase B: raw audio clip upload + storage backend.
-	AudioMaxClipBytes int64    // env AUDIO_MAX_CLIP_BYTES, default 5*1024*1024
-	AudioAllowedMIME  []string // env AUDIO_ALLOWED_MIME, default "audio/m4a,audio/mp4,audio/wav,audio/aac"
-	BlobstoreBackend  string   // env BLOBSTORE_BACKEND, default "filesystem"
-	BlobstoreFSRoot   string   // env BLOBSTORE_FS_ROOT, default "./var/blobstore"
+	AudioMaxClipBytes  int64    // env AUDIO_MAX_CLIP_BYTES, default 5*1024*1024
+	AudioAllowedMIME   []string // env AUDIO_ALLOWED_MIME, default "audio/m4a,audio/mp4,audio/wav,audio/aac"
+	BlobstoreBackend   string   // env BLOBSTORE_BACKEND, default "filesystem"
+	BlobstoreFSRoot    string   // env BLOBSTORE_FS_ROOT, default "./var/blobstore"
+	BlobstoreGCSBucket string   // env BLOBSTORE_GCS_BUCKET, required when backend=gcs
+	BlobstoreGCSPrefix string   // env BLOBSTORE_GCS_PREFIX, default "clips/"
 }
 
 type AnalyticsService struct {
@@ -97,10 +99,12 @@ func LoadSyncService() (*SyncService, error) {
 		JWTRefreshTTL:     getDuration("JWT_REFRESH_TTL", 60*24*time.Hour),
 		LogLevel:          s.LogLevel,
 		RequestTimeout:    s.RequestTimeout,
-		AudioMaxClipBytes: getInt64("AUDIO_MAX_CLIP_BYTES", 5*1024*1024),
-		AudioAllowedMIME:  getCSV("AUDIO_ALLOWED_MIME", []string{"audio/m4a", "audio/mp4", "audio/wav", "audio/aac"}),
-		BlobstoreBackend:  getenv("BLOBSTORE_BACKEND", "filesystem"),
-		BlobstoreFSRoot:   getenv("BLOBSTORE_FS_ROOT", "./var/blobstore"),
+		AudioMaxClipBytes:  getInt64("AUDIO_MAX_CLIP_BYTES", 5*1024*1024),
+		AudioAllowedMIME:   getCSV("AUDIO_ALLOWED_MIME", []string{"audio/m4a", "audio/mp4", "audio/wav", "audio/aac"}),
+		BlobstoreBackend:   getenv("BLOBSTORE_BACKEND", "filesystem"),
+		BlobstoreFSRoot:    getenv("BLOBSTORE_FS_ROOT", "./var/blobstore"),
+		BlobstoreGCSBucket: getenv("BLOBSTORE_GCS_BUCKET", ""),
+		BlobstoreGCSPrefix: getenv("BLOBSTORE_GCS_PREFIX", "clips/"),
 	}
 	if cfg.AppleAudience == "" {
 		errs = append(errs, errors.New("APPLE_AUDIENCE is required"))
@@ -113,6 +117,12 @@ func LoadSyncService() (*SyncService, error) {
 	}
 	if len(cfg.AudioAllowedMIME) == 0 {
 		errs = append(errs, errors.New("AUDIO_ALLOWED_MIME must list at least one MIME"))
+	}
+	// When BLOBSTORE_BACKEND=gcs, the bucket is mandatory. Failing
+	// closed at startup is the right behavior — silently falling back
+	// to filesystem in production would be a privacy footgun.
+	if cfg.BlobstoreBackend == "gcs" && cfg.BlobstoreGCSBucket == "" {
+		errs = append(errs, errors.New("BLOBSTORE_GCS_BUCKET is required when BLOBSTORE_BACKEND=gcs"))
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)

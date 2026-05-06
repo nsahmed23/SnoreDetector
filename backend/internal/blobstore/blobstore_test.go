@@ -25,6 +25,14 @@ func stores(t *testing.T) []struct {
 			return NewFilesystem(filepath.Join(t.TempDir(), "blobs"))
 		}},
 		{name: "fake", build: func() Store { return NewFake() }},
+		// gcs-fake exercises the GCS adapter against an in-memory
+		// fake gcsClient. It guarantees the GCS implementation honors
+		// the Store contract identically to the filesystem + fake
+		// backends — including ErrNotFound semantics, round-trip
+		// content-type, and concurrent safety.
+		{name: "gcs-fake", build: func() Store {
+			return newGCSWithClient(newFakeGCSClient(), "test-bucket", "clips/")
+		}},
 	}
 }
 
