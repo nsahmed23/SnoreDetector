@@ -71,9 +71,23 @@ struct ErrorBody: Decodable {
 }
 
 actor APIClient {
-    private let config: APIConfig
-    private let session: URLSession
-    private let auth: AuthManager
+    /// The configured base URL + app-version. `nonisolated` because
+    /// `APIConfig` itself is a pure value type with no mutable state,
+    /// so reads are race-free and don't need the actor mailbox. This
+    /// lets `AudioClipSync` (which bypasses `request(_:)` for multipart
+    /// upload) compose its own URLs without an unnecessary actor hop.
+    nonisolated let config: APIConfig
+    /// The shared `AuthManager`. `nonisolated` for the same reason as
+    /// `config`: it's a `@MainActor` reference type whose own methods
+    /// are MainActor-isolated, so the reference itself can be read
+    /// from any context. `AudioClipSync` uses this to grab the current
+    /// access token + drive a refresh on 401.
+    nonisolated let auth: AuthManager
+    /// Exposed `nonisolated` so `AudioClipSync` can route multipart
+    /// uploads through the same URLSession (and therefore the same
+    /// `MockURLProtocol` configuration in tests). `URLSession` is
+    /// thread-safe by design (Apple documents it as such).
+    nonisolated let urlSession: URLSession
 
     /// Decoder shared across all requests. Snake-case keys are handled
     /// per-type via explicit `CodingKeys`, so no global key strategy.
@@ -119,9 +133,14 @@ actor APIClient {
          session: URLSession = .shared,
          auth: AuthManager) {
         self.config = config
-        self.session = session
+        self.urlSession = session
         self.auth = auth
     }
+
+    /// Read-only accessor for the actor-internal `urlSession` from
+    /// inside the actor. Kept as a private convenience so existing
+    /// `_perform` / `buildRequest` paths don't need to be rewritten.
+    private var session: URLSession { urlSession }
 
     /// Encode a payload with the client's standard encoder. Useful for
     /// callers that want to construct a body without depending on
@@ -186,6 +205,43 @@ actor APIClient {
         } catch {
             throw APIError.decoding(message: "\(error)")
         }
+    }
+
+    /// Variant of `request(_:)` that returns the raw HTTP body bytes
+    /// without attempting JSON decoding. Used for binary endpoints
+    /// (today: `DownloadAudioClipEndpoint`, which streams audio).
+    /// Same 401-refresh-replay + 429-Retry-After behaviour as
+    /// `request(_:)`; the only difference is the response handling.
+    func requestData<E: Endpoint>(_ endpoint: E) async throws -> Data {
+        try await _performData(endpoint, allowRefreshRetry: true)
+    }
+
+    private func _performData<E: Endpoint>(_ endpoint: E, allowRefreshRetry: Bool) async throws -> Data {
+        let req = try await buildRequest(for: endpoint)
+
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+
+        if http.statusCode == 401 && endpoint.requiresAuth && allowRefreshRetry {
+            try await auth.refresh()
+            return try await _performData(endpoint, allowRefreshRetry: false)
+        }
+        if http.statusCode == 429 {
+            let retry = http.value(forHTTPHeaderField: "Retry-After")
+                .flatMap { TimeInterval($0) }
+            throw APIError.rateLimited(retryAfterSeconds: retry)
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            // For binary endpoints the body MAY be the standard
+            // `{"error": "..."}` JSON envelope on failure, OR raw HTML
+            // from an upstream proxy. Try the JSON shape first.
+            let msg = (try? decoder.decode(ErrorBody.self, from: data))?.error
+                ?? "HTTP \(http.statusCode)"
+            throw APIError.server(statusCode: http.statusCode, message: msg)
+        }
+        return data
     }
 
     /// Compose the URL + headers + body for an endpoint.

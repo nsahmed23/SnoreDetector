@@ -5,12 +5,19 @@
 // `APIClient.request(_:)` can render it into a `URLRequest` without
 // duplicating per-call wiring.
 //
-// Shape mirrors `backend/README.md` (Phase-1 sync-service):
-//   POST /auth/apple        — exchange Apple identity_token for tokens
-//   POST /auth/refresh      — rotate a refresh token; replaced_by is set
-//   POST /auth/logout       — revoke access JTI + refresh family
-//   POST /events            — bulk upload (≤500), idempotent on client_event_id
-//   GET  /events            — list events, opaque compound cursor
+// Shape mirrors `backend/README.md` (Phase-1 sync-service + Phase-B
+// audio cloud sync):
+//   POST   /auth/apple             — exchange Apple identity_token for tokens
+//   POST   /auth/refresh           — rotate a refresh token; replaced_by is set
+//   POST   /auth/logout            — revoke access JTI + refresh family
+//   POST   /events                 — bulk upload (≤500), idempotent on client_event_id
+//   GET    /events                 — list events, opaque compound cursor
+//   POST   /sessions               — open/refresh recording session, idempotent on client_session_id
+//   GET    /sessions               — list sessions, newest-first, cursor paged
+//   POST   /audio/clips            — upload one audio clip (multipart), idempotent on client_clip_id
+//   GET    /audio/clips            — list own clip metadata, newest-first
+//   GET    /audio/clips/{id}/download — stream raw clip bytes
+//   DELETE /audio/clips/{id}       — soft-delete clip + best-effort blob delete
 //
 // All bodies and responses use snake_case JSON; `CodingKeys` are
 // declared explicitly so we don't need `keyDecodingStrategy` (which
@@ -24,6 +31,7 @@ import Foundation
 enum HTTPMethod: String {
     case get = "GET"
     case post = "POST"
+    case delete = "DELETE"
 }
 
 /// Base configuration for the API client. The base URL must include
@@ -250,4 +258,303 @@ struct WireSnoreEvent: Codable, Equatable, Hashable {
         case avgDB = "avg_db"
         case sessionID = "session_id"
     }
+}
+
+// MARK: - Sessions endpoints (Phase D)
+
+/// `POST /sessions` — record (or refresh) a recording session.
+/// Idempotent on `client_session_id`. Re-posting the same id returns
+/// the same `session_id` and updates `ended_at`/`device_name`/
+/// `app_version` only when the new value is non-null (COALESCE
+/// semantics on the backend; see backend/internal/store/clips.go).
+struct PostSessionEndpoint: Endpoint {
+    typealias Response = PostSessionResponse
+    let method: HTTPMethod = .post
+    let path: String = "/sessions"
+    let body: Data?
+    let requiresAuth: Bool = true
+
+    init(clientSessionID: String,
+         startedAt: Date,
+         endedAt: Date?,
+         deviceName: String?,
+         appVersion: String?) throws {
+        let req = PostSessionRequest(
+            clientSessionID: clientSessionID,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            deviceName: deviceName,
+            appVersion: appVersion
+        )
+        self.body = try JSONEncoder.snoreguard.encode(req)
+    }
+}
+
+/// `GET /sessions?cursor=…&limit=…` — newest-first paginated list of
+/// the authenticated user's recording sessions. Cursor is opaque
+/// base64; `limit` clamps to `[1, 1000]` (backend default 100).
+struct ListSessionsEndpoint: Endpoint {
+    typealias Response = ListSessionsResponse
+    let method: HTTPMethod = .get
+    let path: String = "/sessions"
+    let requiresAuth: Bool = true
+    let queryItems: [URLQueryItem]?
+
+    init(cursor: String? = nil, limit: Int = 200) {
+        var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor, !cursor.isEmpty {
+            items.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        self.queryItems = items
+    }
+}
+
+/// Request body for `POST /sessions`. Mirrors backend
+/// `postSessionRequest` (sessions.go) field-for-field.
+struct PostSessionRequest: Encodable, Equatable {
+    let clientSessionID: String
+    let startedAt: Date
+    let endedAt: Date?
+    let deviceName: String?
+    let appVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case clientSessionID = "client_session_id"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case deviceName = "device_name"
+        case appVersion = "app_version"
+    }
+}
+
+/// Response shape for `POST /sessions`. `created == false` when this
+/// was an idempotent retry — that's a successful no-op, NOT an error.
+struct PostSessionResponse: Decodable, Equatable {
+    let sessionID: String
+    let created: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case created
+    }
+}
+
+/// Response shape for `GET /sessions`. `nextCursor == nil` means the
+/// caller has reached the tail; pass it back next pull to pick up
+/// rows that landed in the meantime.
+struct ListSessionsResponse: Decodable, Equatable {
+    let sessions: [WireSession]
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessions
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// On-the-wire shape of a recording session (sessionDTO in the
+/// backend). The `device_name` / `app_version` / `ended_at` fields
+/// are `omitempty` server-side, hence Optional here.
+struct WireSession: Codable, Equatable, Hashable {
+    let sessionID: String
+    let clientSessionID: String
+    let startedAt: Date
+    let endedAt: Date?
+    let deviceName: String?
+    let appVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case clientSessionID = "client_session_id"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+        case deviceName = "device_name"
+        case appVersion = "app_version"
+    }
+}
+
+// MARK: - Audio-clip endpoints (Phase D)
+
+/// `GET /audio/clips?cursor=…&limit=…` — newest-first paginated list
+/// of the user's clip metadata. Identical query-shape to
+/// `ListSessionsEndpoint`. The body bytes are fetched separately via
+/// `DownloadAudioClipEndpoint` on demand.
+struct ListAudioClipsEndpoint: Endpoint {
+    typealias Response = ListAudioClipsResponse
+    let method: HTTPMethod = .get
+    let path: String = "/audio/clips"
+    let requiresAuth: Bool = true
+    let queryItems: [URLQueryItem]?
+
+    init(cursor: String? = nil, limit: Int = 200) {
+        var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor, !cursor.isEmpty {
+            items.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        self.queryItems = items
+    }
+}
+
+/// Response shape for `GET /audio/clips`. Same cursor convention as
+/// the events / sessions list endpoints.
+struct ListAudioClipsResponse: Decodable, Equatable {
+    let clips: [WireAudioClip]
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case clips
+        case nextCursor = "next_cursor"
+    }
+}
+
+/// On-the-wire shape of an audio clip. Mirrors backend `clipDTO`
+/// (clips.go). NOTE: the list endpoint's `clipDTO` does NOT include
+/// `object_key` — only the POST-create response surfaces it. We make
+/// it optional here so a future backend revision that decides to
+/// expose it on list won't break decoding.
+struct WireAudioClip: Codable, Equatable, Hashable {
+    let clipID: String
+    /// Optional remote-session UUID. Empty/missing in the backend's
+    /// JSON when the clip wasn't attached to a session.
+    let sessionID: String?
+    let clientClipID: String
+    let clientEventID: String?
+    let startedAt: Date
+    let durationMS: Int32
+    let avgDB: Float?
+    let contentType: String
+    let sizeBytes: Int64
+    let sha256: String
+    /// Server-controlled blob key. Optional because list/clipDTO does
+    /// NOT include it; only the POST-create response does.
+    let objectKey: String?
+    let uploadedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case clipID = "clip_id"
+        case sessionID = "session_id"
+        case clientClipID = "client_clip_id"
+        case clientEventID = "client_event_id"
+        case startedAt = "started_at"
+        case durationMS = "duration_ms"
+        case avgDB = "avg_db"
+        case contentType = "content_type"
+        case sizeBytes = "size_bytes"
+        case sha256
+        case objectKey = "object_key"
+        case uploadedAt = "uploaded_at"
+    }
+}
+
+/// `GET /audio/clips/{id}/download` — stream the raw audio bytes.
+/// Uses `APIClient.requestData(_:)` rather than the JSON-decoding
+/// path because the body is binary, not JSON.
+///
+/// `Response = Data` is sentinel-typed: `APIClient.request(_:)` would
+/// fail to decode raw bytes as JSON, so callers must use
+/// `APIClient.requestData(_:)`. The associated type still satisfies
+/// `Decodable` because `Data` itself conforms.
+struct DownloadAudioClipEndpoint: Endpoint {
+    typealias Response = Data
+    let method: HTTPMethod = .get
+    let path: String
+    let body: Data? = nil
+    let requiresAuth: Bool = true
+
+    init(clipID: String) {
+        self.path = "/audio/clips/\(clipID)/download"
+    }
+}
+
+/// `DELETE /audio/clips/{id}` — soft-delete the metadata row + best-
+/// effort blob delete. Server returns `{"status": "deleted"}` on
+/// success; we don't surface that to callers.
+struct DeleteAudioClipEndpoint: Endpoint {
+    typealias Response = EmptyResponse
+    let method: HTTPMethod = .delete
+    let path: String
+    let body: Data? = nil
+    let requiresAuth: Bool = true
+
+    init(clipID: String) {
+        self.path = "/audio/clips/\(clipID)"
+    }
+}
+
+/// Response from `POST /audio/clips`. Decoded directly inside
+/// `AudioClipSync.upload(...)` since multipart upload bypasses the
+/// stock `Endpoint` flow.
+struct PostAudioClipResponse: Decodable, Equatable {
+    let clipID: String
+    let created: Bool
+    let objectKey: String
+    let uploadedAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case clipID = "clip_id"
+        case created
+        case objectKey = "object_key"
+        case uploadedAt = "uploaded_at"
+    }
+}
+
+// MARK: - Shared encoder / decoder
+
+/// Shared `JSONEncoder` for endpoints that pre-encode their bodies.
+/// `dateEncodingStrategy = .iso8601` matches the backend's RFC3339
+/// expectations. We deliberately do NOT set `keyEncodingStrategy =
+/// .convertToSnakeCase` — every Encodable type in this file declares
+/// explicit `CodingKeys`, and `convertToSnakeCase` would mangle
+/// already-correct keys (e.g. turning `client_session_id` from a
+/// CodingKey into a re-snake-cased `clientsessionid`).
+extension JSONEncoder {
+    static let snoreguard: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+}
+
+/// Shared `JSONDecoder` matching the backend's mixed-precision
+/// timestamp output. Same custom strategy as `APIClient.decoder`
+/// (kept in sync); this extension exists so callers outside the
+/// actor (e.g. `AudioClipSync`'s manual multipart path) can decode
+/// responses without re-instantiating the decoder.
+extension JSONDecoder {
+    static let snoreguard: JSONDecoder = {
+        let d = JSONDecoder()
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        d.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let str = try container.decode(String.self)
+            if let date = withFraction.date(from: str) { return date }
+            if let date = plain.date(from: str) { return date }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Expected ISO8601 date, got: \(str)"
+            )
+        }
+        return d
+    }()
+}
+
+/// Shared ISO8601 formatter used by `AudioClipSync` to stamp the
+/// `started_at` field inside multipart metadata (where we hand-build
+/// JSON via `JSONSerialization` for forward-compatible part shape).
+extension ISO8601DateFormatter {
+    static let snoreguard: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+}
+
+/// Backend's standard `{"error": "..."}` error envelope, exposed at
+/// file scope so `AudioClipSync` (which bypasses the standard
+/// `APIClient.request` path for multipart upload) can decode it.
+struct WireErrorBody: Decodable, Equatable {
+    let error: String
 }
