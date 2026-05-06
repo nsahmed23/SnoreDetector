@@ -31,6 +31,7 @@ final class RecorderViewModel: ObservableObject {
     private let log = Logger(subsystem: "com.snoreguard.app", category: "Recorder")
     private let settingsStore: SettingsStore
     private let engine: AudioEngine
+    private let eventStore: EventStore
     private var core: SnoreCore?
     private var pollTimer: AnyCancellable?
     private var settingsCancellable: AnyCancellable?
@@ -46,9 +47,11 @@ final class RecorderViewModel: ObservableObject {
     private var engineDelegateProxy: AudioEngineProxy?
 
     init(settingsStore: SettingsStore,
-         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize)) {
+         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize),
+         eventStore: EventStore = EventStore()) {
         self.settingsStore = settingsStore
         self.engine = engine
+        self.eventStore = eventStore
 
         // Forward live settings changes into the running detector.
         self.settingsCancellable = settingsStore.$settings
@@ -119,6 +122,13 @@ final class RecorderViewModel: ObservableObject {
         if var s = session {
             s.endedAt = .now
             session = s
+        }
+
+        // Persist the finished session via Core Data on a background
+        // context. The session is captured by value, so the Task
+        // closure has its own copy — write happens off the main actor.
+        if let s = session {
+            Task { await eventStore.record(s) }
         }
         core = nil
         state = .stopped

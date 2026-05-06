@@ -30,17 +30,22 @@ ios/
 │   │   └── RecorderViewModel.swift   @MainActor; wires engine ↔ core ↔ UI
 │   ├── Views/
 │   │   ├── RecordTabView.swift
-│   │   ├── HistoryTabView.swift      placeholder (real history → phase 5)
+│   │   ├── HistoryTabView.swift      Core Data-backed list (phase 2-C)
 │   │   ├── SettingsTabView.swift
 │   │   ├── LevelMeterView.swift
 │   │   ├── DisclaimerBanner.swift
 │   │   └── ConsentSheet.swift
 │   ├── Persistence/
-│   │   └── SettingsStore.swift       UserDefaults-backed
+│   │   ├── SettingsStore.swift       UserDefaults-backed
+│   │   ├── PersistenceController.swift   Core Data stack (app-group SQLite)
+│   │   ├── EventStore.swift          domain API: record/fetch/markSynced
+│   │   └── SessionEntity.xcdatamodeld    Session ↔ Event schema
 │   └── Resources/Assets.xcassets/    AppIcon + AccentColor placeholders
 └── SnoreGuardTests/
     ├── SnoreCoreTests.swift          FFI lifecycle + sustained-input event
-    └── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    ├── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    └── Persistence/
+        └── EventStoreTests.swift     in-memory Core Data round-trips
 ```
 
 ## Build flow
@@ -105,6 +110,31 @@ Audio session:
 - `audio` is the only entry in `UIBackgroundModes` for now —
   `processing` / `remote-notification` etc. land in later phases.
 
+## Persistence (Core Data)
+
+Phase 2-C ships the on-device session history.
+
+- **Schema** (`Persistence/SessionEntity.xcdatamodeld`): two entities,
+  `SessionEntity` has-many `EventEntity` with cascade-delete on the
+  parent. Schema versioning is enabled and lightweight migration is
+  on (`shouldMigrateStoreAutomatically` + `shouldInferMappingModelAutomatically`)
+  so additive schema changes don't require an explicit mapping model.
+- **Storage location**: app-group container
+  `group.com.snoreguard.shared` so a future Watch extension or share
+  extension can read the same SQLite file. The app-group capability
+  lives in `SnoreGuard/SnoreGuard.entitlements`. Provisioning the
+  matching App ID + group in the Apple Developer portal is a Mac-side
+  step — see the verification checklist below.
+- **Layering**: `EventStore` is the only thing that touches
+  `NSManagedObjectContext` directly. The view layer uses
+  `HistoryViewModel` (Core Data values flow in via async
+  `allSessions()`); `RecorderViewModel.stop()` calls
+  `eventStore.record(session)` on a detached `Task` so the write
+  happens on a background context off the main actor.
+- **Tests**: `SnoreGuardTests/Persistence/EventStoreTests.swift`
+  exercises insert + fetch-by-range + unsynced + markSynced against
+  an in-memory store, so the suite stays fast and hermetic.
+
 ## Verification checklist
 
 - [ ] `xcodegen generate` produces a clean `SnoreGuard.xcodeproj`.
@@ -129,7 +159,8 @@ Audio session:
 
 ## Out of scope (future phases)
 
-- **Persistent history** (Core Data / SwiftData) — phase 5 of the port plan.
+- **Persistent history** (Core Data) — landed in phase 2-C. See
+  [Persistence](#persistence-core-data) below.
 - **HealthKit** read/write — phase 3 (`claude/ios-healthkit`).
 - **Backend sync** (the Go services in `backend/`) — phase 4/5
   already shipped on the backend side; the iOS network client lands

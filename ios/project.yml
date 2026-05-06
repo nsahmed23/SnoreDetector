@@ -64,6 +64,11 @@ targets:
         # Keep symbol stripping reasonable so crash reports point
         # back at our Swift code, not just hex addresses.
         STRIP_INSTALLED_PRODUCT: NO
+        # App-group container for Core Data SQLite. Lets a future
+        # Watch / share extension read the same DB. Provisioning
+        # the matching App ID + group in the Apple Developer
+        # portal is a Mac-side step.
+        CODE_SIGN_ENTITLEMENTS: SnoreGuard/SnoreGuard.entitlements
     dependencies:
       - framework: ../rust-core/SnoreGuardCore.xcframework
         embed: false
