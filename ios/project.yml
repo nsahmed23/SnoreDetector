@@ -1,0 +1,97 @@
+name: SnoreGuard
+options:
+  bundleIdPrefix: com.snoreguard
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  defaultConfig: Debug
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    GENERATE_INFOPLIST_FILE: NO
+
+packages: {}
+
+targets:
+  SnoreGuard:
+    type: application
+    platform: iOS
+    sources:
+      - path: SnoreGuard
+    info:
+      path: SnoreGuard/Info.plist
+      properties:
+        CFBundleDisplayName: SnoreGuard
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [armv7]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Required to keep AVAudioEngine running with the screen
+        # locked / app backgrounded. Phase 4 of the port plan
+        # extends this with HealthKit + background app refresh.
+        UIBackgroundModes:
+          - audio
+        # Microphone access is the only sensitive permission this
+        # phase needs. The wording mirrors the in-app explainer the
+        # ConsentSheet shows on first launch.
+        NSMicrophoneUsageDescription: >-
+          SnoreGuard listens to ambient audio while you sleep so it can
+          flag possible snoring. Audio is processed entirely on-device
+          and never recorded or uploaded.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.snoreguard.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        # Path is relative to the .xcodeproj. The xcframework is
+        # built by `rust-core/scripts/build-xcframework.sh` (phase 1)
+        # and is intentionally NOT committed — see ios/README.md.
+        FRAMEWORK_SEARCH_PATHS:
+          - $(PROJECT_DIR)/../rust-core
+        OTHER_LDFLAGS:
+          - "-framework"
+          - "SnoreGuardCore"
+        # Keep symbol stripping reasonable so crash reports point
+        # back at our Swift code, not just hex addresses.
+        STRIP_INSTALLED_PRODUCT: NO
+    dependencies:
+      - framework: ../rust-core/SnoreGuardCore.xcframework
+        embed: false
+        codeSign: false
+
+  SnoreGuardTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: SnoreGuardTests
+    dependencies:
+      - target: SnoreGuard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.snoreguard.app.tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/SnoreGuard.app/SnoreGuard"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  SnoreGuard:
+    build:
+      targets:
+        SnoreGuard: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - SnoreGuardTests
+    archive:
+      config: Release
