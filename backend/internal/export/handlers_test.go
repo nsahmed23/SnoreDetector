@@ -28,9 +28,11 @@ const testKey = "test-signing-key-must-be-at-least-32-bytes-long!"
 // exercise the streaming pagination path. Only the user the test
 // authenticates as gets results — everything else is filtered.
 type fakeStore struct {
-	events  []store.SnoreEvent
-	pingErr error
-	listErr error
+	events   []store.SnoreEvent
+	sessions []store.RecordingSession
+	clips    []store.AudioClip
+	pingErr  error
+	listErr  error
 
 	// Per-user export-audit log — populated by RecordExport, queried
 	// by CountExportsInWindow / OldestExportInWindow.
@@ -120,6 +122,84 @@ func (f *fakeStore) OldestExportInWindow(_ context.Context, uid uuid.UUID, since
 		}
 	}
 	return oldest, nil
+}
+
+// ListSessions / ListAudioClips power the include=sessions,clips path.
+// Both apply the same DESC compound-cursor filter as the real store.
+func (f *fakeStore) ListSessions(_ context.Context, uid uuid.UUID, cursor store.DescCursor, limit int) ([]store.RecordingSession, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	mine := []store.RecordingSession{}
+	for _, s := range f.sessions {
+		if s.UserID != uid {
+			continue
+		}
+		mine = append(mine, s)
+	}
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].StartedAt.Equal(mine[j].StartedAt) {
+			return mine[i].StartedAt.After(mine[j].StartedAt)
+		}
+		return mine[i].ID.String() > mine[j].ID.String()
+	})
+	out := []store.RecordingSession{}
+	for _, s := range mine {
+		if !cursor.StartedAt.IsZero() || cursor.ID != uuid.Nil {
+			if !descLess(s.StartedAt, s.ID, cursor.StartedAt, cursor.ID) {
+				continue
+			}
+		}
+		out = append(out, s)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) ListAudioClips(_ context.Context, uid uuid.UUID, cursor store.DescCursor, limit int) ([]store.AudioClip, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	mine := []store.AudioClip{}
+	for _, c := range f.clips {
+		if c.UserID != uid || c.DeletedAt != nil {
+			continue
+		}
+		mine = append(mine, c)
+	}
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].StartedAt.Equal(mine[j].StartedAt) {
+			return mine[i].StartedAt.After(mine[j].StartedAt)
+		}
+		return mine[i].ID.String() > mine[j].ID.String()
+	})
+	out := []store.AudioClip{}
+	for _, c := range mine {
+		if !cursor.StartedAt.IsZero() || cursor.ID != uuid.Nil {
+			if !descLess(c.StartedAt, c.ID, cursor.StartedAt, cursor.ID) {
+				continue
+			}
+		}
+		out = append(out, c)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// descLess returns true iff (at, aid) < (bt, bid) lexicographically.
+// Used to enforce "strictly less than the cursor" for DESC pagination.
+func descLess(at time.Time, aid uuid.UUID, bt time.Time, bid uuid.UUID) bool {
+	if at.Before(bt) {
+		return true
+	}
+	if at.After(bt) {
+		return false
+	}
+	return aid.String() < bid.String()
 }
 
 type harness struct {
@@ -479,5 +559,167 @@ func TestExportCSV_WritesAuditRow(t *testing.T) {
 	}
 	if a.bytesSent == nil || *a.bytesSent == 0 {
 		t.Errorf("bytesSent should be non-zero, got %v", a.bytesSent)
+	}
+}
+
+// --- Phase B: ?include=sessions,clips coverage ---
+
+func seedSession(h *harness, csid string, startedAt time.Time) uuid.UUID {
+	id := uuid.New()
+	h.store.sessions = append(h.store.sessions, store.RecordingSession{
+		ID:              id,
+		UserID:          h.uid,
+		ClientSessionID: csid,
+		StartedAt:       startedAt,
+	})
+	return id
+}
+
+func seedClip(h *harness, ccid string, startedAt time.Time) uuid.UUID {
+	id := uuid.New()
+	h.store.clips = append(h.store.clips, store.AudioClip{
+		ID:           id,
+		UserID:       h.uid,
+		ClientClipID: ccid,
+		StartedAt:    startedAt,
+		DurationMS:   1500,
+		ContentType:  "audio/m4a",
+		SizeBytes:    2048,
+		SHA256:       strings.Repeat("a", 64),
+		ObjectKey:    "clips/" + h.uid.String() + "/" + id.String(),
+		UploadedAt:   startedAt,
+	})
+	return id
+}
+
+func TestExportJSON_IncludeClips_AddsTopLevel(t *testing.T) {
+	h := newHarness(t)
+	seed(h, 1)
+	seedClip(h, "clip-1", time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC))
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json?include=clips"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Events []map[string]any `json:"events"`
+		Clips  []map[string]any `json:"clips"`
+		Count  map[string]int   `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+	if len(resp.Events) != 1 {
+		t.Errorf("events = %d, want 1", len(resp.Events))
+	}
+	if len(resp.Clips) != 1 {
+		t.Errorf("clips = %d, want 1", len(resp.Clips))
+	}
+	if resp.Count["clips"] != 1 {
+		t.Errorf("count.clips = %d, want 1 (raw=%v)", resp.Count["clips"], resp.Count)
+	}
+	if resp.Count["events"] != 1 {
+		t.Errorf("count.events = %d, want 1", resp.Count["events"])
+	}
+}
+
+func TestExportJSON_IncludeSessionsAndClips(t *testing.T) {
+	h := newHarness(t)
+	seed(h, 2)
+	seedSession(h, "sess-A", time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC))
+	seedSession(h, "sess-B", time.Date(2026, 5, 5, 2, 0, 0, 0, time.UTC))
+	seedClip(h, "clip-X", time.Date(2026, 5, 5, 3, 0, 0, 0, time.UTC))
+
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json?include=sessions,clips"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Events   []map[string]any `json:"events"`
+		Sessions []map[string]any `json:"sessions"`
+		Clips    []map[string]any `json:"clips"`
+		Count    map[string]int   `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v\n%s", err, rec.Body.String())
+	}
+	if len(resp.Sessions) != 2 || len(resp.Clips) != 1 || len(resp.Events) != 2 {
+		t.Errorf("counts: sessions=%d, clips=%d, events=%d (want 2/1/2)",
+			len(resp.Sessions), len(resp.Clips), len(resp.Events))
+	}
+	if resp.Count["sessions"] != 2 || resp.Count["clips"] != 1 || resp.Count["events"] != 2 {
+		t.Errorf("count map = %v", resp.Count)
+	}
+}
+
+func TestExportJSON_NoInclude_PreservesOriginalShape(t *testing.T) {
+	h := newHarness(t)
+	seed(h, 1)
+	seedClip(h, "clip-X", time.Date(2026, 5, 5, 3, 0, 0, 0, time.UTC))
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// Original shape: count is a flat int, no clips/sessions keys.
+	var resp struct {
+		Events []map[string]any `json:"events"`
+		Count  int              `json:"count"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, rec.Body.String())
+	}
+	if resp.Count != 1 {
+		t.Errorf("count = %d, want 1", resp.Count)
+	}
+	// Confirm we did NOT leak the clips key when include is absent.
+	body := rec.Body.String()
+	if strings.Contains(body, `"clips":`) {
+		t.Errorf("backward-compat broken: clips key present without include=clips: %s", body)
+	}
+}
+
+func TestExportJSON_RejectsBadInclude(t *testing.T) {
+	h := newHarness(t)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json?include=sessions,bogus"))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status=%d, want 400", rec.Code)
+	}
+}
+
+func TestExportCSV_IncludeClips_AddsSection(t *testing.T) {
+	h := newHarness(t)
+	seed(h, 1)
+	seedClip(h, "clip-1", time.Date(2026, 5, 5, 1, 0, 0, 0, time.UTC))
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv?include=clips"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "# section: events") {
+		t.Errorf("events section header missing: %s", body)
+	}
+	if !strings.Contains(body, "# section: clips") {
+		t.Errorf("clips section header missing: %s", body)
+	}
+	if !strings.Contains(body, "clip-1") {
+		t.Errorf("clip-1 row missing: %s", body)
+	}
+}
+
+func TestExportCSV_NoInclude_KeepsOriginalShape(t *testing.T) {
+	h := newHarness(t)
+	seed(h, 1)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "# section:") {
+		t.Errorf("section header leaked into vanilla CSV: %s", body)
 	}
 }
