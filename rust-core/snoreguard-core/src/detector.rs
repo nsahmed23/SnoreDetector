@@ -181,6 +181,35 @@ impl Detector {
     pub fn take_event(&mut self) -> Option<Event> {
         self.pending_event.take()
     }
+
+    /// Flush any in-flight event. Call this when the caller stops
+    /// pushing frames (e.g. user stopped recording mid-snore) so the
+    /// active event isn't silently dropped.
+    ///
+    /// Returns `Some(Event)` when the detector was inside an event,
+    /// `None` otherwise. The detector's in-event state is reset either
+    /// way.
+    pub fn finish(&mut self) -> Option<Event> {
+        if !self.in_event {
+            return None;
+        }
+        let duration_frames = self.active_frames as u64;
+        let duration_ms_u64 = frames_to_ms(duration_frames, self.cfg.sample_rate_hz);
+        let avg_db = if duration_frames > 0 {
+            self.event_intensity_sum / duration_frames as f32
+        } else {
+            0.0
+        };
+        let ev = Event {
+            start_ms: frames_to_ms(self.event_start_frame, self.cfg.sample_rate_hz),
+            duration_ms: duration_ms_u64.min(u32::MAX as u64) as u32,
+            avg_db,
+        };
+        self.in_event = false;
+        self.active_frames = 0;
+        self.event_intensity_sum = 0.0;
+        Some(ev)
+    }
 }
 
 /// Map an FFT magnitude average to a uncalibrated dB-ish value in
@@ -237,9 +266,11 @@ mod tests {
 
     #[test]
     fn sustained_low_frequency_above_threshold_emits_event() {
-        let mut cfg = DetectorConfig::default();
-        cfg.threshold_db = 35.0;
-        cfg.sensitivity = Sensitivity::High;
+        let cfg = DetectorConfig {
+            threshold_db: 35.0,
+            sensitivity: Sensitivity::High,
+            ..DetectorConfig::default()
+        };
         let mut d = Detector::new(cfg);
         let mut phase = 0.0;
         // 100 Hz at full amplitude — strong low-frequency content.
@@ -258,9 +289,11 @@ mod tests {
 
     #[test]
     fn high_frequency_does_not_dominate_low() {
-        let mut cfg = DetectorConfig::default();
-        cfg.threshold_db = 35.0;
-        cfg.sensitivity = Sensitivity::Medium;
+        let cfg = DetectorConfig {
+            threshold_db: 35.0,
+            sensitivity: Sensitivity::Medium,
+            ..DetectorConfig::default()
+        };
         let mut d = Detector::new(cfg);
         let mut phase = 0.0;
         // 4 kHz tone — sits in the upper 3/4 of the spectrum, so
@@ -278,9 +311,11 @@ mod tests {
     #[test]
     fn brief_low_freq_burst_does_not_emit_event() {
         // Burst shorter than the sustain window must not produce an event.
-        let mut cfg = DetectorConfig::default();
-        cfg.threshold_db = 35.0;
-        cfg.sensitivity = Sensitivity::High;
+        let cfg = DetectorConfig {
+            threshold_db: 35.0,
+            sensitivity: Sensitivity::High,
+            ..DetectorConfig::default()
+        };
         let mut d = Detector::new(cfg);
         let mut phase = 0.0;
         for _ in 0..(DEFAULT_SUSTAIN_FRAMES as usize - 2) {
@@ -298,9 +333,11 @@ mod tests {
         // A signal with moderate low-freq dominance should pass at High
         // sensitivity (1.2× multiplier) but fail at Low (2.0×).
         let make_detector = |s: Sensitivity| {
-            let mut cfg = DetectorConfig::default();
-            cfg.threshold_db = 35.0;
-            cfg.sensitivity = s;
+            let cfg = DetectorConfig {
+                threshold_db: 35.0,
+                sensitivity: s,
+                ..DetectorConfig::default()
+            };
             Detector::new(cfg)
         };
 
@@ -341,5 +378,33 @@ mod tests {
             d.push_frame(&[0.0; 128]);
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn finish_emits_in_flight_event() {
+        let cfg = DetectorConfig {
+            threshold_db: 35.0,
+            sensitivity: Sensitivity::High,
+            ..DetectorConfig::default()
+        };
+        let mut d = Detector::new(cfg);
+        let mut phase = 0.0;
+        // Feed enough sustained low-frequency frames to be inside an
+        // event (i.e. past DEFAULT_SUSTAIN_FRAMES) without ending it.
+        for _ in 0..(DEFAULT_SUSTAIN_FRAMES as usize + 5) {
+            let frame = sine_frame(100.0, cfg.sample_rate_hz, 0.9, &mut phase);
+            d.push_frame(&frame);
+        }
+        let ev = d.finish().expect("expected an in-flight event");
+        assert!(ev.duration_ms > 0);
+        assert!(ev.avg_db >= 35.0);
+        // Calling finish again should now return None (state reset).
+        assert!(d.finish().is_none());
+    }
+
+    #[test]
+    fn finish_when_idle_returns_none() {
+        let mut d = Detector::new(DetectorConfig::default());
+        assert!(d.finish().is_none());
     }
 }

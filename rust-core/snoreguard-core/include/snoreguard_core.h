@@ -21,21 +21,22 @@
  */
 #define DEFAULT_SUSTAIN_FRAMES 15
 
+#define SG_STATUS_OK 0
+
+#define SG_STATUS_EVENT_READY 1
+
+#define SG_STATUS_NULL_POINTER -1
+
+#define SG_STATUS_INVALID_LENGTH -2
+
+#define SG_STATUS_INVALID_ARGUMENT -3
+
 enum SgSensitivity {
   Low = 0,
   Medium = 1,
   High = 2,
 };
 typedef uint8_t SgSensitivity;
-
-enum SgStatus {
-  Ok = 0,
-  EventReady = 1,
-  NullPointer = -1,
-  InvalidLength = -2,
-  InvalidArgument = -3,
-};
-typedef int32_t SgStatus;
 
 /**
  * Opaque handle. Swift sees this as a forward-declared struct and
@@ -50,8 +51,9 @@ typedef struct SgEvent {
 } SgEvent;
 
 /**
- * Construct a detector. Returns NULL only if the allocation fails
- * (rustfft planner construction is the only fallible step).
+ * Construct a detector. Returns NULL on invalid arguments
+ * (`sample_rate_hz == 0`, or `threshold_db` non-finite) or if the
+ * underlying allocation fails.
  */
 struct SgDetector *sg_detector_new(float threshold_db,
                                    SgSensitivity sensitivity,
@@ -68,11 +70,11 @@ void sg_detector_free(struct SgDetector *d);
  * [`crate::FRAME_SIZE`] (256) `f32` values.
  *
  * Returns:
- * - [`SgStatus::EventReady`] (1) if a new event was finalized — the
+ * - `SG_STATUS_EVENT_READY` (1) if a new event was finalized — the
  *   caller should immediately call [`sg_detector_poll_event`] to read
  *   it before pushing more frames.
- * - [`SgStatus::Ok`] (0) on a successful push without an event.
- * - Negative [`SgStatus`] on input error.
+ * - `SG_STATUS_OK` (0) on a successful push without an event.
+ * - Negative `SG_STATUS_*` on input error.
  */
 int32_t sg_detector_push_frame(struct SgDetector *d, const float *samples, uintptr_t len);
 
@@ -83,6 +85,17 @@ int32_t sg_detector_push_frame(struct SgDetector *d, const float *samples, uintp
  * none, negative on error.
  */
 int32_t sg_detector_poll_event(struct SgDetector *d, struct SgEvent *out);
+
+/**
+ * Flush any in-flight event. Call when the caller stops pushing
+ * frames (e.g. user stopped recording mid-snore) so the active event
+ * isn't silently dropped.
+ *
+ * Returns 1 and writes the event into `*out` when one was in flight;
+ * 0 when the detector was idle; negative `SG_STATUS_*` on error.
+ * Mirrors the convention of [`sg_detector_poll_event`].
+ */
+int32_t sg_detector_finish(struct SgDetector *d, struct SgEvent *out);
 
 int32_t sg_detector_set_threshold(struct SgDetector *d, float threshold_db);
 

@@ -50,7 +50,7 @@ failure modes.
 
 ```sh
 cd snoreguard-core
-cargo test                  # 13 tests across unit + FFI integration
+cargo test                  # 18 tests across unit + FFI integration
 cargo build --release       # produces target/release/libsnoreguard_core.a
 ```
 
@@ -89,13 +89,20 @@ dependency (linked + embedded "Do not embed" since it's a static library).
 
 | Function | Purpose |
 |---|---|
-| `sg_detector_new` | Allocate a detector. Returns NULL on `sample_rate_hz == 0`. |
+| `sg_detector_new` | Allocate a detector. Returns NULL on `sample_rate_hz == 0` or non-finite `threshold_db` (NaN/±Inf). |
 | `sg_detector_free` | Free a detector (NULL-safe). |
-| `sg_detector_push_frame` | Push exactly 256 `f32` samples. Returns `SgStatus::EventReady` (1) when an event was just finalized. |
+| `sg_detector_push_frame` | Push exactly 256 `f32` samples. Returns `SG_STATUS_EVENT_READY` (1) when an event was just finalized. |
 | `sg_detector_poll_event` | Drain the most-recently-finalized event. |
+| `sg_detector_finish` | Flush any in-flight event when the caller stops pushing frames. Returns 1 + writes `*out` if an event was active, 0 otherwise. |
 | `sg_detector_set_threshold` | Update threshold dB at runtime. |
 | `sg_detector_set_sensitivity` | Update sensitivity at runtime. |
 | `sg_frame_size` | Returns `FRAME_SIZE` (256). |
+
+Status codes are exported as plain integer constants (`SG_STATUS_OK`,
+`SG_STATUS_EVENT_READY`, `SG_STATUS_NULL_POINTER`, `SG_STATUS_INVALID_LENGTH`,
+`SG_STATUS_INVALID_ARGUMENT`) rather than a C `enum`, so Swift imports them as
+unambiguous `Int32` constants instead of a typealias plus colliding
+top-level globals.
 
 Threading: the detector is **not** `Sync`. Confine all calls to one thread or
 serialize via a queue. The expected pattern (per
