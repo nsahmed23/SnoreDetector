@@ -15,6 +15,7 @@ import (
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
 
@@ -64,15 +65,21 @@ func New(d Deps) http.Handler {
 	r.Get("/healthz", healthHandler(d))
 
 	authH := &authHandler{deps: d}
-	r.Post("/auth/apple", authH.handle)
-	r.Post("/auth/refresh", authH.refresh)
+	// Per-IP limits on the unauthenticated auth endpoints. Each
+	// route gets its own bucket via r.With(...) — using r.Use(...)
+	// here would share one limiter across all auth routes.
+	r.With(ratelimit.PerIP(10, time.Minute)).Post("/auth/apple", authH.handle)
+	r.With(ratelimit.PerIP(30, time.Minute)).Post("/auth/refresh", authH.refresh)
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(d.JWT, d.Store))
-		r.Post("/auth/logout", authH.logout)
+		// Per-user limits on authenticated routes. /auth/logout is
+		// authenticated but stays cheap so we cap it at the same
+		// rate as /auth/refresh for symmetry.
+		r.With(ratelimit.PerUser(30, time.Minute)).Post("/auth/logout", authH.logout)
 		evH := &eventsHandler{deps: d}
-		r.Post("/events", evH.create)
-		r.Get("/events", evH.list)
+		r.With(ratelimit.PerUser(200, time.Minute)).Post("/events", evH.create)
+		r.With(ratelimit.PerUser(200, time.Minute)).Get("/events", evH.list)
 	})
 
 	return r

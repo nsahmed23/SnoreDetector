@@ -16,6 +16,7 @@ import (
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
 
@@ -54,8 +55,9 @@ func New(d Deps) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(auth.Middleware(d.JWT, d.Store))
 		h := &handler{deps: d}
-		r.Get("/analytics/summary", h.dailySummary)
-		r.Get("/analytics/totals", h.totals)
+		// Per-user limit, separate bucket per route.
+		r.With(ratelimit.PerUser(60, time.Minute)).Get("/analytics/summary", h.dailySummary)
+		r.With(ratelimit.PerUser(60, time.Minute)).Get("/analytics/totals", h.totals)
 	})
 
 	return r

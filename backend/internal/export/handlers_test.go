@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +31,19 @@ type fakeStore struct {
 	events  []store.SnoreEvent
 	pingErr error
 	listErr error
+
+	// Per-user export-audit log — populated by RecordExport, queried
+	// by CountExportsInWindow / OldestExportInWindow.
+	auditMu sync.Mutex
+	audits  []exportAudit
+}
+
+type exportAudit struct {
+	userID      uuid.UUID
+	requestedAt time.Time
+	format      string
+	bytesSent   *int64
+	statusCode  int
 }
 
 func (f *fakeStore) ListEvents(_ context.Context, uid uuid.UUID, cursor store.Cursor, limit int) ([]store.SnoreEvent, error) {
@@ -67,6 +81,46 @@ func (f *fakeStore) ListEvents(_ context.Context, uid uuid.UUID, cursor store.Cu
 }
 func (f *fakeStore) Ping(_ context.Context) error                           { return f.pingErr }
 func (f *fakeStore) IsJTIRevoked(_ context.Context, _ string) (bool, error) { return false, nil }
+
+func (f *fakeStore) RecordExport(_ context.Context, uid uuid.UUID, format string, bytesSent *int64, status int) error {
+	f.auditMu.Lock()
+	defer f.auditMu.Unlock()
+	f.audits = append(f.audits, exportAudit{
+		userID:      uid,
+		requestedAt: time.Now().UTC(),
+		format:      format,
+		bytesSent:   bytesSent,
+		statusCode:  status,
+	})
+	return nil
+}
+
+func (f *fakeStore) CountExportsInWindow(_ context.Context, uid uuid.UUID, since time.Time) (int, error) {
+	f.auditMu.Lock()
+	defer f.auditMu.Unlock()
+	count := 0
+	for _, a := range f.audits {
+		if a.userID == uid && a.requestedAt.After(since) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func (f *fakeStore) OldestExportInWindow(_ context.Context, uid uuid.UUID, since time.Time) (time.Time, error) {
+	f.auditMu.Lock()
+	defer f.auditMu.Unlock()
+	var oldest time.Time
+	for _, a := range f.audits {
+		if a.userID != uid || !a.requestedAt.After(since) {
+			continue
+		}
+		if oldest.IsZero() || a.requestedAt.Before(oldest) {
+			oldest = a.requestedAt
+		}
+	}
+	return oldest, nil
+}
 
 type harness struct {
 	router http.Handler
@@ -322,5 +376,108 @@ func TestExportJSON_StoreError_500AfterHeaders(t *testing.T) {
 	// 200 because the error happens after we've already written `{"events":[`.
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d", rec.Code)
+	}
+}
+
+// budgetHarness builds a harness with a finite per-user export budget
+// over a configurable rolling window. Used by the budget-enforcement
+// tests below.
+func budgetHarness(t *testing.T, budget int, window time.Duration) *harness {
+	t.Helper()
+	iss, err := authjwt.New([]byte(testKey), "test-iss", time.Hour)
+	if err != nil {
+		t.Fatalf("jwt: %v", err)
+	}
+	st := &fakeStore{}
+	uid := uuid.New()
+	return &harness{
+		router: New(Deps{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Store:  st,
+			JWT:    iss,
+			Budget: budget,
+			Window: window,
+		}),
+		store: st,
+		jwt:   iss,
+		uid:   uid,
+	}
+}
+
+func TestExportCSV_RespectsBudget(t *testing.T) {
+	h := budgetHarness(t, 2, 24*time.Hour)
+	seed(h, 3)
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d: status = %d, want 200", i+1, rec.Code)
+		}
+	}
+	// Third request must hit the budget.
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("third call: status = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("expected Retry-After header on budget rejection")
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := resp["retry_after_seconds"]; !ok {
+		t.Errorf("missing retry_after_seconds in body: %v", resp)
+	}
+}
+
+func TestExportJSON_RespectsBudget(t *testing.T) {
+	h := budgetHarness(t, 1, 24*time.Hour)
+	seed(h, 2)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first call: status = %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.json"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second call: status = %d, want 429", rec.Code)
+	}
+}
+
+func TestExportCSV_ZeroBudgetMeansUnlimited(t *testing.T) {
+	// Budget=0 disables the budget check entirely.
+	h := budgetHarness(t, 0, 24*time.Hour)
+	for i := 0; i < 5; i++ {
+		rec := httptest.NewRecorder()
+		h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d should not be limited (budget=0): status = %d", i+1, rec.Code)
+		}
+	}
+}
+
+func TestExportCSV_WritesAuditRow(t *testing.T) {
+	h := budgetHarness(t, 100, 24*time.Hour)
+	seed(h, 2)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, h.authReq(t, "/export/events.csv"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(h.store.audits) != 1 {
+		t.Fatalf("audits = %d, want 1", len(h.store.audits))
+	}
+	a := h.store.audits[0]
+	if a.format != "csv" {
+		t.Errorf("format = %q", a.format)
+	}
+	if a.statusCode != http.StatusOK {
+		t.Errorf("statusCode = %d", a.statusCode)
+	}
+	if a.bytesSent == nil || *a.bytesSent == 0 {
+		t.Errorf("bytesSent should be non-zero, got %v", a.bytesSent)
 	}
 }

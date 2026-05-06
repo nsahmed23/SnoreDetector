@@ -414,6 +414,71 @@ WHERE user_id = $1 AND started_at >= $2;
 	return t, nil
 }
 
+// RecordExport inserts a row into export_audit recording one
+// completed (or failed) export request. `bytesSent` is nil for
+// requests that aborted before any body was written.
+func (s *Store) RecordExport(
+	ctx context.Context,
+	userID uuid.UUID,
+	format string,
+	bytesSent *int64,
+	statusCode int,
+) error {
+	const q = `
+INSERT INTO export_audit (user_id, format, bytes_sent, status_code)
+VALUES ($1, $2, $3, $4);
+`
+	if _, err := s.pool.Exec(ctx, q, userID, format, bytesSent, statusCode); err != nil {
+		return fmt.Errorf("store: record export: %w", err)
+	}
+	return nil
+}
+
+// CountExportsInWindow returns the number of export_audit rows for
+// the given user with requested_at strictly after `since`. Used to
+// enforce the per-user export budget.
+func (s *Store) CountExportsInWindow(
+	ctx context.Context,
+	userID uuid.UUID,
+	since time.Time,
+) (int, error) {
+	const q = `
+SELECT COUNT(*) FROM export_audit
+WHERE user_id = $1 AND requested_at > $2;
+`
+	var n int
+	if err := s.pool.QueryRow(ctx, q, userID, since).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count exports in window: %w", err)
+	}
+	return n, nil
+}
+
+// OldestExportInWindow returns the timestamp of the oldest
+// export_audit row for the user with requested_at strictly after
+// `since`. Used to compute retry_after_seconds when the budget is
+// exhausted: the oldest row in the window will be the first to age
+// out, so retry-after = (oldest + window) - now.
+//
+// Returns (zero time, nil) when no rows match.
+func (s *Store) OldestExportInWindow(
+	ctx context.Context,
+	userID uuid.UUID,
+	since time.Time,
+) (time.Time, error) {
+	const q = `
+SELECT MIN(requested_at) FROM export_audit
+WHERE user_id = $1 AND requested_at > $2;
+`
+	var t *time.Time
+	if err := s.pool.QueryRow(ctx, q, userID, since).Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("store: oldest export in window: %w", err)
+	}
+	if t == nil {
+		return time.Time{}, nil
+	}
+	return *t, nil
+}
+
 // Ping verifies connectivity. Used by /healthz.
 func (s *Store) Ping(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)

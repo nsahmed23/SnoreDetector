@@ -66,13 +66,14 @@ type AnalyticsService struct {
 }
 
 type ExportService struct {
-	Addr           string
-	DatabaseURL    string
-	JWTSigningKey  []byte
-	JWTIssuer      string
-	JWTTTL         time.Duration
-	LogLevel       string
-	RequestTimeout time.Duration
+	Addr               string
+	DatabaseURL        string
+	JWTSigningKey      []byte
+	JWTIssuer          string
+	JWTTTL             time.Duration
+	LogLevel           string
+	RequestTimeout     time.Duration
+	ExportBudgetPerDay int
 }
 
 func LoadSyncService() (*SyncService, error) {
@@ -124,13 +125,14 @@ func LoadExportService() (*ExportService, error) {
 		return nil, errors.Join(errs...)
 	}
 	return &ExportService{
-		Addr:           s.Addr,
-		DatabaseURL:    s.DatabaseURL,
-		JWTSigningKey:  s.JWTSigningKey,
-		JWTIssuer:      s.JWTIssuer,
-		JWTTTL:         s.JWTTTL,
-		LogLevel:       s.LogLevel,
-		RequestTimeout: s.RequestTimeout,
+		Addr:               s.Addr,
+		DatabaseURL:        s.DatabaseURL,
+		JWTSigningKey:      s.JWTSigningKey,
+		JWTIssuer:          s.JWTIssuer,
+		JWTTTL:             s.JWTTTL,
+		LogLevel:           s.LogLevel,
+		RequestTimeout:     s.RequestTimeout,
+		ExportBudgetPerDay: getInt("EXPORT_BUDGET_PER_DAY", 5),
 	}, nil
 }
 
@@ -139,6 +141,21 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getInt returns the env var parsed as an int, or `fallback` if
+// unset or unparseable.
+func getInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: invalid %s=%q, using default %d\n", key, v, fallback)
+		return fallback
+	}
+	return n
 }
 
 func getDuration(key string, fallback time.Duration) time.Duration {
