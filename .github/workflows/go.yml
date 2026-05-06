@@ -11,18 +11,36 @@ jobs:
   test:
     name: go vet + test + build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
+
+      # backend/ doesn't exist on `main` yet (lands via PR #3). Skip the
+      # heavy steps when this workflow ran because the workflow file
+      # itself was touched.
+      - name: Detect backend
+        id: detect
+        run: |
+          if [ -f backend/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::backend/ not on this branch — skipping go steps"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - name: go vet
+      - if: steps.detect.outputs.present == 'true'
+        name: go vet
+        working-directory: backend
         run: go vet ./...
-      - name: go test
+      - if: steps.detect.outputs.present == 'true'
+        name: go test
+        working-directory: backend
         run: go test ./...
-      - name: go build
+      - if: steps.detect.outputs.present == 'true'
+        name: go build
+        working-directory: backend
         run: go build ./cmd/...

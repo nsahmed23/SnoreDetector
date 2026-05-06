@@ -11,21 +11,40 @@ jobs:
   test:
     name: cargo test + clippy
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust-core/snoreguard-core
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+
+      # The rust-core crate doesn't exist on `main` yet (lands via PR #2).
+      # Skip the heavy steps when the workflow ran because we touched
+      # the workflow file itself rather than the crate.
+      - name: Detect rust-core
+        id: detect
+        run: |
+          if [ -f rust-core/snoreguard-core/Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::rust-core not on this branch — skipping cargo steps"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.detect.outputs.present == 'true'
+        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
+      - if: steps.detect.outputs.present == 'true'
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
         with:
           workspaces: rust-core/snoreguard-core
-      - name: cargo test
+      - if: steps.detect.outputs.present == 'true'
+        name: cargo test
+        working-directory: rust-core/snoreguard-core
         run: cargo test --all-features
-      - name: cargo build --release
+      - if: steps.detect.outputs.present == 'true'
+        name: cargo build --release
+        working-directory: rust-core/snoreguard-core
         run: cargo build --release
-      - name: cargo clippy
+      - if: steps.detect.outputs.present == 'true'
+        name: cargo clippy
+        working-directory: rust-core/snoreguard-core
         run: cargo clippy --all-targets -- -D warnings

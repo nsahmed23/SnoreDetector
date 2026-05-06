@@ -11,9 +11,6 @@ jobs:
   integration:
     name: store integration tests
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     services:
       postgres:
         image: postgres:16-alpine
@@ -31,9 +28,26 @@ jobs:
       DATABASE_URL: postgres://snoreguard:dev-only-password@localhost:5432/snoreguard?sslmode=disable
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
+
+      # backend/ doesn't exist on `main` yet (lands via PR #3). Skip
+      # when the workflow ran because we touched the workflow file
+      # itself.
+      - name: Detect backend
+        id: detect
+        run: |
+          if [ -f backend/go.mod ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::backend/ not on this branch — skipping integration tests"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.detect.outputs.present == 'true'
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
-      - name: integration tests
+      - if: steps.detect.outputs.present == 'true'
+        name: integration tests
+        working-directory: backend
         run: go test -tags=integration ./internal/store/...
