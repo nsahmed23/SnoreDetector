@@ -15,6 +15,22 @@ services — see [`docs/NATIVE_IOS_PORT_PLAN.md`](docs/NATIVE_IOS_PORT_PLAN.md).
 > diagnose sleep apnea or any sleep disorder. See
 > [`docs/DISCLAIMER.md`](docs/DISCLAIMER.md).
 
+## Production-grade architecture
+
+SnoreGuard's v1 target spans iOS (Swift), an on-device Rust detector, three Go backend services, HealthKit r/w, opt-in cloud sync of sessions + events + raw-audio clips, observability via OpenTelemetry, privacy controls, and CI. Deep-dive docs:
+
+- [Architecture overview](docs/ARCHITECTURE.md) — system + data-flow diagrams
+- [Architecture decision records](docs/ADRs/) — eight ADRs covering language choices + scope decisions
+- [Threat model](docs/THREAT_MODEL.md)
+- [Privacy + data lifecycle](docs/PRIVACY_AND_DATA_LIFECYCLE.md)
+- [Observability](docs/OBSERVABILITY.md)
+- [Test strategy](docs/TEST_STRATEGY.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Roadmap to production](docs/ROADMAP_PRODUCTION_READY.md)
+- [Portfolio narrative](docs/PORTFOLIO_NARRATIVE.md) — recruiter-facing one-page summary
+
+v1 scope explicitly includes HealthKit r/w (three opt-in toggles), backend cloud sync, raw audio clip upload (double opt-in), CSV/JSON export, and OpenTelemetry. This is **not a local-only MVP**.
+
 ## Features (prototype)
 
 * **Snore detection** — tracks via a frequency-aware heuristic (FFT energy +
