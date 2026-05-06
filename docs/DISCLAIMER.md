@@ -41,9 +41,17 @@ The volume threshold and detector sensitivity controls in Settings exist to let 
 - No audio is uploaded to any server unless you explicitly export or share it.
 - Cloud sync (when enabled) transmits **summary statistics and metadata only** by default — never raw audio.
 
-## HealthKit data handling
+## Apple Health
 
-When you enable HealthKit sync, the app writes one `environmentalAudioExposure` HKQuantitySample per detected snore event, with the average noise level for that event window. **The dB values are uncalibrated relative magnitudes from a heuristic detector — they are not SPL meter readings, and the metadata on each sample makes that explicit.** The app also requests read access to `sleepAnalysis` (granted but unused in this build; phase-5 analytics will correlate snore events with sleep state). You can revoke either scope at any time from iOS Settings → Health → Data Access & Devices → SnoreGuard.
+SnoreGuard's Apple Health integration is **opt-in per direction** and disabled by default. Three independent toggles in Settings control what the app reads and writes:
+
+1. **Read sleep stages from Apple Health.** When enabled, SnoreGuard reads your sleep-stage samples to correlate them with detected snore-like events. Read access is never inferred or implied by the write toggles below; you must enable each independently.
+
+2. **Write SnoreGuard sessions to Apple Health.** When enabled, each completed recording session is written as a single `HKCategorySample` of type `sleepAnalysis` with value `inBed` for the session window. **SnoreGuard never infers REM, core, or deep stages from microphone data**, even when the read toggle is on. Sample metadata flags the entry as `estimated="true"`, `uncalibrated="true"`, `not_diagnostic="true"`, `source="snoreguard"`.
+
+3. **Write estimated sound levels to Apple Health.** When enabled, each detected snore-like event window is written as an `HKQuantitySample` of type `environmentalAudioExposure`. **The values are uncalibrated relative magnitudes from a heuristic detector — not SPL meter readings.** Metadata: `estimated="true"`, `uncalibrated="true"`, `not_diagnostic="true"`, `event_type="snore_like_event"`, `detector_version`, `source="snoreguard"`.
+
+Revoke any combination of permissions at any time from iOS Settings → Health → Data Access & Devices → SnoreGuard.
 
 ## "As-is"
 

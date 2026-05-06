@@ -25,7 +25,12 @@ struct ConsentSheet: View {
                     bullet("All audio processing happens on your device. Audio is never recorded or uploaded.")
                     bullet("False positives and false negatives are expected. Persistent loud snoring, gasping, or pauses in breathing should be discussed with a clinician.")
                     bullet("To listen continuously, the app needs microphone access.")
-                    bullet("Apple Health sync is optional and off by default. If you turn it on in Settings, snore events are written as audio-exposure samples — the dB values are not calibrated SPL, so treat them as relative.")
+                    bullet("Reading sleep stages from Apple Health is optional and off by default.")
+                    bullet("Writing SnoreGuard sessions as inBed samples is optional and off by default.")
+                    bullet("Writing estimated sound levels (uncalibrated audio-exposure samples) is optional and off by default.")
+                    Text("All three toggles can be changed at any time in Settings; SnoreGuard never infers REM, core, or deep stages from microphone data.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
 
                     Spacer(minLength: 24)
 
