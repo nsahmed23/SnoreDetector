@@ -32,6 +32,7 @@ backend/
 │   ├── server/                      sync-service-specific handlers + router
 │   ├── analytics/                   analytics-service handlers
 │   ├── export/                      export-service handlers (streaming CSV/JSON)
+│   ├── blobstore/                   raw audio body storage (filesystem + fake; GCS/S3 stubbed)
 │   ├── httpkit/                     tiny shared JSON helpers
 │   ├── otel/                        OpenTelemetry setup, env-driven, no-op fallback
 │   └── config/                      env-driven configs for each service
@@ -63,10 +64,16 @@ docker compose --profile app --profile otel up -d
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| `GET`  | `/healthz` | — | Liveness + Postgres ping |
-| `POST` | `/auth/apple` | — | Verify Apple `identity_token`, upsert user, return session JWT |
-| `POST` | `/events` | Bearer | Bulk-upload up to 500 events (idempotent on `client_event_id`) |
-| `GET`  | `/events?since=...&limit=...` | Bearer | List own events, ordered by `received_at` ASC |
+| `GET`    | `/healthz` | — | Liveness + Postgres ping |
+| `POST`   | `/auth/apple` | — | Verify Apple `identity_token`, upsert user, return session JWT |
+| `POST`   | `/events` | Bearer | Bulk-upload up to 500 events (idempotent on `client_event_id`) |
+| `GET`    | `/events?since=...&limit=...` | Bearer | List own events, ordered by `received_at` ASC |
+| `POST`   | `/sessions` | Bearer | Open or update a recording session (idempotent on `client_session_id`) |
+| `GET`    | `/sessions?cursor=...&limit=...` | Bearer | List own sessions, newest-first |
+| `POST`   | `/audio/clips` | Bearer | Upload one raw audio clip (`multipart/form-data`); idempotent on `client_clip_id` |
+| `GET`    | `/audio/clips?cursor=...&limit=...` | Bearer | List own clip metadata, newest-first |
+| `GET`    | `/audio/clips/{id}/download` | Bearer | Stream the raw audio bytes for one clip |
+| `DELETE` | `/audio/clips/{id}` | Bearer | Soft-delete the clip metadata + best-effort delete the object |
 
 ### analytics-service (`:8081`)
 
@@ -81,8 +88,8 @@ docker compose --profile app --profile otel up -d
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | `GET` | `/healthz` | — | Liveness + Postgres ping |
-| `GET` | `/export/events.csv?since=&max=` | Bearer | Streaming CSV download. `max` caps total rows (1..1,000,000). |
-| `GET` | `/export/events.json?since=&max=` | Bearer | Streaming JSON download (`{"events":[…],"count":N}`). |
+| `GET` | `/export/events.csv?since=&max=&include=` | Bearer | Streaming CSV download. `max` caps total rows (1..1,000,000). `include=sessions,clips` appends extra sections. |
+| `GET` | `/export/events.json?since=&max=&include=` | Bearer | Streaming JSON download. Default shape is `{"events":[…],"count":N}`; with `include=sessions,clips` the shape becomes `{"events":[…],"sessions":[…],"clips":[…],"count":{...}}`. |
 
 Both export endpoints stream rows in 500-event pages, so even
 multi-month exports stay flat in memory. Exports filter strictly to
@@ -93,8 +100,8 @@ the authenticated user; cross-user reads are tested in
 
 | Command | Coverage | Needs |
 |---|---|---|
-| `make test` | All 62 unit + handler tests across `apple`, `auth`, `jwt`, `server`, `analytics`, `export` | Just `go` |
-| `make test-integration` | Real Postgres via `pgx` — upserts, idempotent inserts, listing, migrations | Postgres reachable via `DATABASE_URL` |
+| `make test` | 144 unit + handler tests across `apple`, `auth`, `jwt`, `server`, `analytics`, `export`, `blobstore` | Just `go` |
+| `make test-integration` | Real Postgres via `pgx` — upserts, idempotent inserts, listing, migrations, recording sessions, audio clips | Postgres reachable via `DATABASE_URL` |
 
 Integration tests are gated behind `//go:build integration` so they
 never run on the default test pass.
@@ -171,6 +178,82 @@ token is marked `replaced_by` and rejected on subsequent calls.
 Body: `{"refresh_token": "..."}`, with the access token in
 `Authorization: Bearer …`. Revokes the access token's `jti` and the
 refresh token's entire family.
+
+### Recording sessions
+
+`POST /sessions` records (or refreshes) a recording session — the
+device-side container that snore events and audio clips attach to.
+Body:
+
+```json
+{
+  "client_session_id": "device-session-uuid",
+  "started_at": "2026-05-05T03:14:00Z",
+  "ended_at":   "2026-05-05T11:00:00Z",  // optional; can be sent later
+  "device_name": "iPhone 16",            // optional
+  "app_version": "1.0.0"                  // optional
+}
+```
+
+Response: `{"session_id": "...", "created": true|false}`. Re-posting
+the same `client_session_id` returns the same `session_id` and
+updates `ended_at`/`device_name`/`app_version` only when the new
+value is non-null (`COALESCE` semantics).
+
+`GET /sessions?cursor=...&limit=...` lists the user's sessions
+newest-first. The `cursor` is opaque base64 (same shape as the
+`/events` cursor); `limit` clamps to `[1, 1000]` (default 100).
+
+### Audio clip upload (opt-in cloud sync)
+
+`POST /audio/clips` is `multipart/form-data` with two parts:
+
+- `metadata` (JSON):
+  ```json
+  {
+    "client_clip_id": "device-clip-uuid",
+    "client_event_id": "...",          // optional link to an event
+    "session_id": "...",                // optional remote session UUID
+    "started_at": "2026-05-05T03:14:00Z",
+    "duration_ms": 1500,
+    "avg_db": 62.5,                     // optional
+    "sha256": "<64 hex chars of file body>"
+  }
+  ```
+- `file`: the raw audio bytes.
+
+The handler:
+
+1. Caps the multipart body at `AUDIO_MAX_CLIP_BYTES` (default 5 MiB).
+2. Requires both the part's declared `Content-Type` and the
+   `http.DetectContentType` sniff to be on `AUDIO_ALLOWED_MIME`
+   (default `audio/m4a,audio/mp4,audio/wav,audio/aac`). Mismatch
+   on either side returns `415`.
+3. Computes the SHA-256 of the body and compares it to the
+   metadata's `sha256`. Mismatch returns `400`.
+4. Persists the metadata row first, then writes the body to the
+   blobstore under a server-generated `clips/<user_id>/<uuid>` key.
+5. On a duplicate `client_clip_id`, returns the existing row
+   verbatim and **does not overwrite the stored object** — first
+   confirmed upload wins.
+
+Response: `{"clip_id":"...","created":true|false,"object_key":"clips/.../...","uploaded_at":"..."}`.
+
+`GET /audio/clips` lists the user's non-deleted clip metadata
+newest-first, paginated by the same opaque cursor as `/sessions`.
+
+`GET /audio/clips/{id}/download` streams the raw bytes (rate-limited
+to 10/hour per user — see "rate limits" below).
+
+`DELETE /audio/clips/{id}` soft-deletes the metadata row (`deleted_at`
+is set), then best-effort removes the object from the blobstore.
+Subsequent reads/downloads return `404`. The audit row survives
+forever for ops review; reaping deleted blobs is a follow-up.
+
+**Retention**: this PR does not enforce a retention policy. Clips
+live until the user deletes them (or the operator runs a manual
+cleanup). Per-user / per-tenant retention defaults are tracked in
+the orchestration plan.
 
 ### `GET /export/events.csv` and `GET /export/events.json`
 
@@ -255,6 +338,10 @@ Every service reads:
 | `APPLE_ISSUER` | `https://appleid.apple.com` | Apple JWT `iss` |
 | `JWT_REFRESH_ISSUER` | `snoreguard-refresh` | Refresh-token `iss` (must differ from `JWT_ISSUER`) |
 | `JWT_REFRESH_TTL` | `1440h` | Refresh-token lifetime (60d) |
+| `AUDIO_MAX_CLIP_BYTES` | `5242880` (5 MiB) | Per-clip upload body cap (multipart envelope is `cap + 64KiB`). Anything larger returns 413. |
+| `AUDIO_ALLOWED_MIME` | `audio/m4a,audio/mp4,audio/wav,audio/aac` | Comma-separated MIME allowlist for clip uploads. Both the declared `Content-Type` and the sniffed body type must match. |
+| `BLOBSTORE_BACKEND` | `filesystem` | `filesystem` (production-ready local), `fake` (in-memory, tests only). `gcs`/`s3` are stubbed for ADR 0008. |
+| `BLOBSTORE_FS_ROOT` | `./var/blobstore` | When backend is `filesystem`, the directory clip bodies live under. |
 
 ### OpenTelemetry
 
@@ -295,8 +382,30 @@ silently re-applying.
 - **Email overwrite**: Apple returns `email` only on first sign-in; the
   store uses `COALESCE(EXCLUDED.email, users.email)` so re-sign-in
   doesn't blank the stored email.
-- **Logging hygiene**: handlers log error messages but never raw tokens
-  or PII bodies.
+- **Logging hygiene**: handlers log error messages but never raw tokens,
+  PII bodies, or raw audio payloads (object keys + sizes only — never
+  the bytes themselves; never the sha256 alongside the user-id in a
+  way that would let log readers correlate a clip to its content).
+- **Object keys never user-controlled**: clip object keys are always
+  `clips/<user_id>/<server-generated-uuid>`. Even a malicious client
+  that puts `..` or absolute paths in `client_clip_id` cannot
+  influence the resulting blobstore key.
+- **Multipart caps + MIME allowlist**: `POST /audio/clips` caps the
+  multipart body at `AUDIO_MAX_CLIP_BYTES` (default 5 MiB), requires
+  the file part's declared `Content-Type` AND the body sniff to be
+  on `AUDIO_ALLOWED_MIME`, and rejects everything else with `415`.
+- **SHA-256 verification**: every uploaded clip's body is hashed and
+  compared to the client-claimed `sha256` before the row is
+  committed; mismatch returns `400` and nothing is written.
+- **Soft-delete then object delete**: `DELETE /audio/clips/{id}`
+  stamps `deleted_at` first (durable audit trail), then issues a
+  best-effort `blobstore.Delete`. If the object delete fails the
+  user still sees their intent honored on subsequent reads, and ops
+  can reap orphans later.
+- **Per-user rate limits + budget on download**: upload is capped
+  at 30/min, list at 60/min, delete at 60/min, download at 10/hour
+  per user — the download cap is the tightest because it's the
+  most expensive (full body egress).
 
 ## sqlc
 
