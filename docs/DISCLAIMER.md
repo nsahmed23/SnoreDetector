@@ -43,7 +43,7 @@ The volume threshold and detector sensitivity controls in Settings exist to let 
 
 ## HealthKit data handling
 
-When you enable HealthKit sync, the app reads sleep stage data from Apple Health and writes nightly snoring duration and average intensity back to Apple Health. The app cannot read or write any other HealthKit category. You can revoke HealthKit access at any time from the iOS Settings app under Health → Data Access & Devices → SnoreGuard.
+When you enable HealthKit sync, the app writes one `environmentalAudioExposure` HKQuantitySample per detected snore event, with the average noise level for that event window. **The dB values are uncalibrated relative magnitudes from a heuristic detector — they are not SPL meter readings, and the metadata on each sample makes that explicit.** The app also requests read access to `sleepAnalysis` (granted but unused in this build; phase-5 analytics will correlate snore events with sleep state). You can revoke either scope at any time from iOS Settings → Health → Data Access & Devices → SnoreGuard.
 
 ## "As-is"
 

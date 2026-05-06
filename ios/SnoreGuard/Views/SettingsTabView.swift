@@ -75,7 +75,7 @@ struct SettingsTabView: View {
                 Text("Apple Health")
             } footer: {
                 if store.syncToAppleHealth {
-                    Text("Snore events are written as audio-exposure samples (uncalibrated dB). Disable any time to stop new writes — existing samples stay in Health unless you delete them in the Health app.")
+                    Text("Snore events are written as audio-exposure samples. **Important:** the dB values are uncalibrated relative magnitudes from a heuristic detector — not SPL meter readings. The Health app will display them in dB(A) SPL but the calibration disclaimer is in each sample's metadata. Disable any time to stop new writes; existing samples stay in Apple Health unless you delete them there.")
                 }
             }
 

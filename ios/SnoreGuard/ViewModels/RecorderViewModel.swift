@@ -117,6 +117,7 @@ final class RecorderViewModel: ObservableObject {
         if let inFlight = core?.finish() {
             session?.events.append(inFlight)
             eventCount += 1
+            forwardToHealthIfEnabled(inFlight)
         }
 
         if var s = session {
