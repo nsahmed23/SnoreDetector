@@ -60,19 +60,68 @@ canary for the production deploy, not a parallel production.
 
 ## Production
 
-Target shape: scale-up topology with the same software but with each
-component sized for real traffic.
+### v1 production target: Google Cloud Platform
 
-| Component | Recommended |
-|---|---|
-| Compute | Load-balanced container runtime: ECS, Cloud Run, GKE/EKS, or Nomad. Multi-replica per service. |
-| Postgres | Managed: Cloud SQL / RDS with automated backups + read replicas |
-| Object store | GCS bucket (private) OR S3 bucket (private, server-side encryption enabled) |
-| Reverse proxy / TLS | Vendor LB (CloudFront / Cloud Load Balancing / GCLB) with managed TLS, OR Caddy in front of the LB |
-| Domain | TBD (production hostname not yet decided) |
-| OTel destination | Tempo / Mimir self-hosted, OR a vendor (Honeycomb / Datadog / Grafana Cloud) |
-| Secret manager | Cloud-vendor secret manager (Secret Manager / AWS Secrets Manager) — never env-vars-in-git |
-| WAF / rate limiting | Edge-layer rate limiting on top of the per-replica limiter |
+Decision recorded 2026-05-06. The blobstore interface (ADR 0008) stays
+vendor-neutral; S3-compatible alternatives (R2, MinIO, B2) remain valid
+future work. v1 deploys to GCP because it fits the existing tooling
+and gives a clean "production cloud platform" story without sprawl.
+
+- **Cloud Run** hosts `sync-service`, `analytics-service`, and
+  `export-service` behind a single load balancer + custom domain.
+  One service per Cloud Run service; concurrency-1 is fine for the
+  audio-upload path because the body is bounded at
+  `AUDIO_MAX_CLIP_BYTES`.
+- **Cloud SQL for PostgreSQL** (latest LTS) is the durable store.
+  Daily managed backups; point-in-time recovery enabled. Private IP
+  only; Cloud Run reaches it through the Serverless VPC Access
+  connector.
+- **Cloud Storage** stores raw audio clips at
+  `gs://<bucket>/clips/<user_id>/<clip_uuid>`. Object lifecycle rules
+  enforce the 30-day retention default. Bucket is uniform-IAM,
+  private, and the per-service runtime service account holds
+  `storage.objects.create`, `.get`, and `.delete` only.
+- **Secret Manager** holds `JWT_SIGNING_KEY`, the Apple Sign-In
+  private key (when we move from public-key-only verification to
+  Apple Sign-In Key signing), and any future API keys. Cloud Run
+  references secrets via `secretRef` so they never appear as env-vars
+  in git or in Cloud Run revisions.
+- **Artifact Registry** stores the three service container images.
+  Image promotion: `staging` tag → `production` tag after smoke
+  tests pass.
+- **Cloud Build** (or **GitHub Actions** deploying via
+  `gcloud run deploy`) is the CI → prod pipeline. Triggered on push
+  to `main` after the rust/go/web/integration workflows go green.
+- **Cloud Logging + Monitoring + Trace** consume the OTel exporter
+  output. The existing `internal/otel.Setup` already speaks OTLP-HTTP;
+  configure the GCP-managed OTel collector or run the OTel Collector
+  with the `googlecloud` exporter. Hashed user IDs are the only
+  user-correlatable attribute that ever reaches the telemetry plane.
+- **Downloads stream through the API in v1.** No signed URLs.
+  Centralizes auth, rate limit, audit, and telemetry on one path.
+  Signed URLs are deferred to v1.x once cost/latency data justifies
+  offloading to Cloud Storage's edge.
+
+The actual `internal/blobstore/gcs.go` adapter implementation is a
+follow-up branch (`claude/backend-gcs-blobstore`) that lands after
+PR #15 (the blobstore interface + filesystem/fake backends) merges.
+
+### Generic production-shape reference
+
+If you want to redeploy on AWS / Cloudflare / Azure later, the
+component table below still applies — only the "Recommended" column
+changes per vendor.
+
+| Component | Recommended (GCP — v1) | Generic |
+|---|---|---|
+| Compute | Cloud Run (per service) | Load-balanced container runtime |
+| Postgres | Cloud SQL with PITR | Managed Postgres + read replicas |
+| Object store | Cloud Storage (private bucket, lifecycle rules) | GCS / S3-compatible / Azure Blob |
+| Reverse proxy / TLS | GCLB (managed TLS) | Vendor LB with managed TLS |
+| Domain | TBD | TBD |
+| OTel destination | Cloud Trace + Cloud Monitoring | Tempo / Mimir / Honeycomb / Datadog |
+| Secret manager | Secret Manager | Vendor-equivalent |
+| WAF / rate limiting | Cloud Armor in front of GCLB | Edge-layer + per-replica limiter |
 
 ---
 

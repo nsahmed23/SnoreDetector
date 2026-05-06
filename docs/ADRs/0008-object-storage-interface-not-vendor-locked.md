@@ -4,6 +4,12 @@
 
 Accepted.
 
+**Decision update — 2026-05-06:** GCS is chosen as the v1 production
+object-storage backend. The blobstore interface remains vendor-neutral.
+S3-compatible adapters (R2, MinIO, Backblaze B2) remain valid future
+work; the interface contract is unchanged. See `DEPLOYMENT.md` for the
+GCP-specific deployment topology.
+
 ## Context
 
 Raw audio clips need an object store. The realistic deploy targets are:
