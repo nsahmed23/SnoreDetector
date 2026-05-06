@@ -22,13 +22,20 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
+
+const tracerName = "snoreguard/export-service"
 
 const pageSize = 500
 
@@ -53,6 +60,9 @@ type Deps struct {
 	Store          Store
 	JWT            *authjwt.Issuer
 	RequestTimeout time.Duration
+
+	// Metrics is the service's instrument bundle. Nil is fine.
+	Metrics *metrics.Instruments
 
 	// Budget is the maximum number of exports a single user may
 	// run inside Window. Zero disables the budget entirely (unit
@@ -81,6 +91,7 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(d.RequestTimeout))
+	r.Use(d.Metrics.HandlerDurationMiddleware)
 
 	r.Get("/healthz", health(d))
 
@@ -114,12 +125,24 @@ func health(d Deps) http.HandlerFunc {
 }
 
 func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "export.events.csv",
+		trace.WithAttributes(
+			attribute.String("endpoint", "export.events.csv"),
+			semconv.HTTPRoute("/export/events.csv"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
+
 	if h.checkBudgetAndMaybeReject(w, r, uid) {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusTooManyRequests))
 		return
 	}
 	ww := wrapWriter(w)
@@ -128,11 +151,13 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	max, err := parseMax(r.URL.Query().Get("max"))
 	if err != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -160,6 +185,7 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, streamSpan := otel.Tracer(tracerName).Start(ctx, "export.events.csv.stream")
 	emitted := 0
 	cursor := store.Cursor{ReceivedAt: since, ID: uuid.Nil}
 	for {
@@ -167,9 +193,11 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 		if max > 0 && max-emitted < want {
 			want = max - emitted
 		}
-		rows, err := h.deps.Store.ListEvents(r.Context(), uid, cursor, want)
+		rows, err := h.deps.Store.ListEvents(ctx, uid, cursor, want)
 		if err != nil {
 			h.deps.Logger.Error("export csv", "err", err.Error())
+			streamSpan.SetAttributes(attribute.Int("emitted", emitted))
+			streamSpan.End()
 			return // headers already written; can't switch to JSON error
 		}
 		if len(rows) == 0 {
@@ -185,6 +213,8 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 				e.ReceivedAt.UTC().Format(time.RFC3339Nano),
 			}); err != nil {
 				h.deps.Logger.Error("csv row", "err", err.Error())
+				streamSpan.SetAttributes(attribute.Int("emitted", emitted))
+				streamSpan.End()
 				return
 			}
 			emitted++
@@ -198,6 +228,8 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cw.Flush()
+	streamSpan.SetAttributes(attribute.Int("emitted", emitted))
+	streamSpan.End()
 
 	if include.Sessions {
 		if err := h.csvSessions(r.Context(), w, cw, uid, max); err != nil {
@@ -211,6 +243,17 @@ func (h *handler) csv(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Counter increment happens after the stream completes — events
+	// that made it into the body are what we count, regardless of
+	// whether ww.bytes is later observed > 0 by recordAudit.
+	if ww.status == http.StatusOK && ww.bytes > 0 {
+		h.deps.Metrics.AddEventsExported(ctx, int64(emitted), metrics.FormatCSV)
+	}
+	span.SetAttributes(
+		attribute.Int("emitted", emitted),
+		semconv.HTTPResponseStatusCode(ww.status),
+	)
 }
 
 // csvSessions writes the recording-sessions section after a blank
@@ -383,12 +426,24 @@ type jsonClip struct {
 // versus the original `{"events":[…], "count": N}`. Backward compat
 // kicks in whenever the include set is empty.
 func (h *handler) json(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "export.events.json",
+		trace.WithAttributes(
+			attribute.String("endpoint", "export.events.json"),
+			semconv.HTTPRoute("/export/events.json"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
+
 	if h.checkBudgetAndMaybeReject(w, r, uid) {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusTooManyRequests))
 		return
 	}
 	ww := wrapWriter(w)
@@ -397,11 +452,13 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 
 	since, err := parseSince(r.URL.Query().Get("since"))
 	if err != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	max, err := parseMax(r.URL.Query().Get("max"))
 	if err != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -419,6 +476,7 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, streamSpan := otel.Tracer(tracerName).Start(ctx, "export.events.json.stream")
 	emittedEvents := 0
 	cursor := store.Cursor{ReceivedAt: since, ID: uuid.Nil}
 	first := true
@@ -427,9 +485,11 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 		if max > 0 && max-emittedEvents < want {
 			want = max - emittedEvents
 		}
-		rows, err := h.deps.Store.ListEvents(r.Context(), uid, cursor, want)
+		rows, err := h.deps.Store.ListEvents(ctx, uid, cursor, want)
 		if err != nil {
 			h.deps.Logger.Error("export json", "err", err.Error())
+			streamSpan.SetAttributes(attribute.Int("emitted", emittedEvents))
+			streamSpan.End()
 			return
 		}
 		if len(rows) == 0 {
@@ -438,6 +498,8 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 		for _, e := range rows {
 			if !first {
 				if _, err := w.Write([]byte(",")); err != nil {
+					streamSpan.SetAttributes(attribute.Int("emitted", emittedEvents))
+					streamSpan.End()
 					return
 				}
 			}
@@ -453,6 +515,8 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 				ReceivedAt:    e.ReceivedAt.UTC(),
 			}); err != nil {
 				h.deps.Logger.Error("json row", "err", err.Error())
+				streamSpan.SetAttributes(attribute.Int("emitted", emittedEvents))
+				streamSpan.End()
 				return
 			}
 			emittedEvents++
@@ -469,6 +533,15 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 	if !include.Any() {
 		// Original shape: {"events":[…],"count":N}.
 		_, _ = w.Write([]byte(fmt.Sprintf(`],"count":%d}`, emittedEvents)))
+	streamSpan.SetAttributes(attribute.Int("emitted", emittedEvents))
+	streamSpan.End()
+	if ww.status == http.StatusOK && ww.bytes > 0 {
+		h.deps.Metrics.AddEventsExported(ctx, int64(emittedEvents), metrics.FormatJSON)
+	}
+	span.SetAttributes(
+		attribute.Int("emitted", emittedEvents),
+		semconv.HTTPResponseStatusCode(ww.status),
+	)
 		return
 	}
 	// Extended shape: write sessions[], clips[], then the count map.
@@ -506,6 +579,15 @@ func (h *handler) json(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`,"count":`))
 	_, _ = w.Write(cb)
 	_, _ = w.Write([]byte(`}`))
+	streamSpan.SetAttributes(attribute.Int("emitted", emittedEvents+emittedSessions+emittedClips))
+	streamSpan.End()
+	if ww.status == http.StatusOK && ww.bytes > 0 {
+		h.deps.Metrics.AddEventsExported(ctx, int64(emittedEvents+emittedSessions+emittedClips), metrics.FormatJSON)
+	}
+	span.SetAttributes(
+		attribute.Int("emitted", emittedEvents+emittedSessions+emittedClips),
+		semconv.HTTPResponseStatusCode(ww.status),
+	)
 }
 
 func (h *handler) jsonSessions(ctx context.Context, w http.ResponseWriter, enc *json.Encoder, uid uuid.UUID, max int) (int, error) {

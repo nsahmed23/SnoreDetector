@@ -355,8 +355,81 @@ All three services follow the standard OTel env-var spec:
 | `OTEL_RESOURCE_ATTRIBUTES` | Extra attributes (`key1=val1,key2=val2`) |
 
 The local docker-compose ships an `otel-collector` profile that
-prints traces + metrics to stdout. Swap the exporter in
+prints traces + metrics to stdout *and* exposes a Prometheus scrape
+endpoint at `:9464`. Swap the exporters in
 `otel-collector-config.yaml` for production.
+
+#### Instruments
+
+Each service builds the same set of instruments at startup via
+`internal/metrics.New(serviceName)`. Only the increments differ —
+sync emits the auth/refresh + ingest counters, export emits the
+export counter, etc. Histograms record in seconds (OpenTelemetry
+semantic conventions).
+
+| Instrument | Type | Unit | Attributes | Where it's recorded |
+|---|---|---|---|---|
+| `events_ingested_total` | counter | `1` | `format=batch` | `POST /events` after a successful bulk insert (sync) |
+| `events_exported_total` | counter | `1` | `format=csv\|json` | `GET /export/events.{csv,json}` after a successful 200 stream (export) |
+| `auth_attempts_total` | counter | `1` | `outcome=success\|invalid_token\|store_error\|bad_request\|misconfigured\|issue_failed` | `POST /auth/apple` (sync) |
+| `refresh_attempts_total` | counter | `1` | `outcome=success\|invalid_token\|expired\|revoked\|theft_detected\|not_found\|store_error\|bad_request\|misconfigured\|issue_failed` | `POST /auth/refresh` (sync) |
+| `http_handler_duration_seconds` | histogram | `s` | `route=<chi route pattern>` | per-request middleware on every router |
+| `store_query_duration_seconds` | histogram | `s` | `query=upsert_user\|insert_events\|list_events\|get_refresh_token\|...` | each `*store.Store` method |
+| `jwt_verify_duration_seconds` | histogram | `s` | `kind=access\|refresh` | `Issuer.VerifyAccess` / `VerifyRefresh` |
+
+Span attributes follow OpenTelemetry semantic conventions:
+- `endpoint` — handler name like `sync.events.create`
+- `http.route` — chi route template (e.g. `/events`)
+- `http.response.status_code` — HTTP status the handler ultimately returned
+- `user_id_hash` — `sha256(user.id)[:8]` hex. **Never the raw UUID.**
+  Use `metrics.HashUserID(uid)` everywhere a user identifier would
+  otherwise leak into a span.
+
+#### Reading the dev collector output
+
+When `docker compose --profile app --profile otel up -d` is running,
+the `otel-collector` container prints traces + metrics to stdout via
+the `debug` exporter. A typical span line looks like:
+
+```
+Span #0
+    Trace ID       : 1c4f…
+    Span ID        : 2a7b…
+    Name           : sync.events.create
+    Kind           : Internal
+    Attributes:
+         -> endpoint: Str(sync.events.create)
+         -> http.route: Str(/events)
+         -> user_id_hash: Str(2a3e9b81f5c4a07d)
+         -> inserted: Int(12)
+         -> http.response.status_code: Int(200)
+```
+
+A counter increment looks like:
+
+```
+Metric #1
+    Name: events_ingested_total
+    Description: Snore events ingested via POST /events
+    Sum dataPoints #0
+        Attributes:
+             -> format: Str(batch)
+             -> service.name: Str(sync-service)
+        Value: 12
+```
+
+#### Local Prometheus scrape
+
+The collector also exposes the metrics in Prometheus exposition
+format on `:9464`. After driving some traffic, a quick sanity
+check:
+
+```bash
+curl -s localhost:9464/metrics | grep -E '^(events|auth|refresh|http_handler|store_query|jwt_verify)'
+```
+
+The counters reset every time the collector restarts (in-memory
+exporter), which is fine for dev.
 
 ## Migrations
 

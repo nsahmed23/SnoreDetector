@@ -1,7 +1,11 @@
 # Minimal OpenTelemetry Collector config for local development.
-# Receives OTLP from the three services and prints to stdout. Swap
-# the `debug` exporter for `otlphttp` / `prometheus` / `jaeger` etc.
-# in production.
+# Receives OTLP from the three services. Traces go to the debug
+# stdout exporter; metrics go to both debug *and* a Prometheus
+# exporter on :9464 so `curl localhost:9464/metrics` after some
+# traffic shows the counters/histograms incrementing in real time.
+#
+# Swap `debug` and `prometheus` for `otlphttp` / Tempo / Jaeger /
+# Mimir / cortex etc. in production.
 
 receivers:
   otlp:
@@ -19,6 +23,8 @@ processors:
 exporters:
   debug:
     verbosity: normal
+  prometheus:
+    endpoint: 0.0.0.0:9464
 
 service:
   pipelines:
@@ -29,4 +35,4 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, prometheus]

@@ -28,7 +28,15 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Tracer returns a named tracer for the given service. Convenience
+// wrapper around otel.Tracer that documents the service-naming
+// convention used by the backend.
+func Tracer(service string) trace.Tracer {
+	return otel.Tracer(service)
+}
 
 // Shutdown drains exporters with a hard timeout. Always call it on
 // service exit; missed shutdowns drop the last batch of telemetry.

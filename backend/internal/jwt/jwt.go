@@ -9,12 +9,15 @@
 package jwt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 )
 
 // Default TTLs.
@@ -24,12 +27,21 @@ const (
 )
 
 type Issuer struct {
-	signingKey     []byte
-	issuer         string
-	refreshIssuer  string
-	ttl            time.Duration
-	refreshTTL     time.Duration
-	now            func() time.Time
+	signingKey    []byte
+	issuer        string
+	refreshIssuer string
+	ttl           time.Duration
+	refreshTTL    time.Duration
+	now           func() time.Time
+	instr         *metrics.Instruments
+}
+
+// WithMetrics installs the histogram recorder used by VerifyAccess /
+// VerifyRefresh. Returns the same Issuer for chaining at startup.
+// Passing nil disables the instrumentation.
+func (i *Issuer) WithMetrics(instr *metrics.Instruments) *Issuer {
+	i.instr = instr
+	return i
 }
 
 // Claims is the subset we put in our access tokens.
@@ -170,6 +182,12 @@ func (i *Issuer) Verify(raw string) (uuid.UUID, error) {
 
 // VerifyAccess validates an access token and returns the parsed claims.
 func (i *Issuer) VerifyAccess(raw string) (*Claims, error) {
+	if i.instr != nil {
+		start := time.Now()
+		defer func() {
+			i.instr.RecordJWTVerifyDuration(context.Background(), time.Since(start).Seconds(), metrics.KindAccess)
+		}()
+	}
 	parser := jwt.NewParser(
 		jwt.WithIssuer(i.issuer),
 		jwt.WithExpirationRequired(),
@@ -193,6 +211,12 @@ func (i *Issuer) VerifyAccess(raw string) (*Claims, error) {
 // claims. Note: signature + TTL only — the caller must additionally
 // consult refresh_tokens to check rotation/revocation status.
 func (i *Issuer) VerifyRefresh(raw string) (*RefreshClaims, error) {
+	if i.instr != nil {
+		start := time.Now()
+		defer func() {
+			i.instr.RecordJWTVerifyDuration(context.Background(), time.Since(start).Seconds(), metrics.KindRefresh)
+		}()
+	}
 	parser := jwt.NewParser(
 		jwt.WithIssuer(i.refreshIssuer),
 		jwt.WithExpirationRequired(),

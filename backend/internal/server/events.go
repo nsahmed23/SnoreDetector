@@ -9,10 +9,18 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
+
+const tracerName = "snoreguard/sync-service"
 
 const (
 	maxEventsPerRequest = 500
@@ -41,21 +49,35 @@ type createEventsResponse struct {
 }
 
 func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "sync.events.create",
+		trace.WithAttributes(
+			attribute.String("endpoint", "sync.events.create"),
+			semconv.HTTPRoute("/events"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
+
 	var req createEventsRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&req); err != nil {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	if len(req.Events) == 0 {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, "events array is empty")
 		return
 	}
 	if len(req.Events) > maxEventsPerRequest {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 		httpkit.Error(w, http.StatusBadRequest, "too many events in one request")
 		return
 	}
@@ -63,9 +85,12 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 	// All-or-nothing: any malformed event rejects the whole batch.
 	// This keeps import semantics atomic — clients never have to
 	// reason about partial success.
+	_, vSpan := otel.Tracer(tracerName).Start(ctx, "sync.events.validate")
 	rows := make([]store.SnoreEvent, 0, len(req.Events))
 	for i, e := range req.Events {
 		if err := validateEvent(e); err != nil {
+			vSpan.End()
+			span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusBadRequest))
 			httpkit.Error(w, http.StatusBadRequest,
 				fmt.Sprintf("event[%d]: %v", i, err))
 			return
@@ -79,14 +104,23 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 			SessionID:     e.SessionID,
 		})
 	}
+	vSpan.SetAttributes(attribute.Int("event_count", len(rows)))
+	vSpan.End()
 
-	inserted, err := h.deps.Store.InsertEvents(r.Context(), uid, rows)
+	inserted, err := h.deps.Store.InsertEvents(ctx, uid, rows)
 	if err != nil {
 		h.deps.Logger.Error("insert events", "err", err.Error(), "user", uid.String())
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusInternalServerError))
 		httpkit.Error(w, http.StatusInternalServerError, "failed to record events")
 		return
 	}
 
+	h.deps.Metrics.AddEventsIngested(ctx, int64(inserted), metrics.FormatBatch)
+	span.SetAttributes(
+		attribute.Int("inserted", inserted),
+		attribute.Int("received", len(req.Events)),
+		semconv.HTTPResponseStatusCode(http.StatusOK),
+	)
 	httpkit.JSON(w, http.StatusOK, createEventsResponse{
 		Inserted: inserted,
 		Received: len(req.Events),
@@ -102,11 +136,21 @@ type listEventsResponse struct {
 }
 
 func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "sync.events.list",
+		trace.WithAttributes(
+			attribute.String("endpoint", "sync.events.list"),
+			semconv.HTTPRoute("/events"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
 
 	q := r.URL.Query()
 	cursor, err := resolveCursor(q.Get("cursor"), q.Get("since"))
@@ -125,12 +169,17 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	rows, err := h.deps.Store.ListEvents(r.Context(), uid, cursor, limit)
+	rows, err := h.deps.Store.ListEvents(ctx, uid, cursor, limit)
 	if err != nil {
 		h.deps.Logger.Error("list events", "err", err.Error())
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusInternalServerError))
 		httpkit.Error(w, http.StatusInternalServerError, "failed to list events")
 		return
 	}
+	span.SetAttributes(
+		attribute.Int("rows", len(rows)),
+		semconv.HTTPResponseStatusCode(http.StatusOK),
+	)
 
 	out := make([]eventDTO, 0, len(rows))
 	for _, e := range rows {

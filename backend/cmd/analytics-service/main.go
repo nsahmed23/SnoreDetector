@@ -18,6 +18,7 @@ import (
 	"github.com/nsahmed23/SnoreDetector/backend/internal/analytics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/config"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	otelsetup "github.com/nsahmed23/SnoreDetector/backend/internal/otel"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
@@ -53,23 +54,30 @@ func run() error {
 		}
 	}()
 
+	instr, err := metrics.New(serviceName)
+	if err != nil {
+		return err
+	}
+
 	pool, err := store.Connect(rootCtx, cfg.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	st := store.New(pool)
+	st := store.New(pool).WithMetrics(instr)
 
 	jwtIss, err := authjwt.New(cfg.JWTSigningKey, cfg.JWTIssuer, cfg.JWTTTL)
 	if err != nil {
 		return err
 	}
+	jwtIss.WithMetrics(instr)
 
 	handler := analytics.New(analytics.Deps{
 		Logger:         logger,
 		Store:          st,
 		JWT:            jwtIss,
 		RequestTimeout: cfg.RequestTimeout,
+		Metrics:        instr,
 	})
 
 	srv := &http.Server{

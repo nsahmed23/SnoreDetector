@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 )
 
 // ErrAlreadyRotated indicates a refresh-token row's `replaced_by` is
@@ -26,10 +28,30 @@ var ErrAlreadyRotated = errors.New("store: refresh token already rotated")
 var ErrRefreshNotFound = errors.New("store: refresh token not found")
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	instr *metrics.Instruments
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
+
+// WithMetrics installs the service's metrics so each query call site
+// can record store_query_duration_seconds. Returns the same Store for
+// chaining at startup. Passing nil is fine — the recorder is nil-safe.
+func (s *Store) WithMetrics(instr *metrics.Instruments) *Store {
+	s.instr = instr
+	return s
+}
+
+// observeQuery records the duration of one named query. Defer it
+// at the top of each query method:
+//
+//	defer s.observeQuery(ctx, "list_events", time.Now())
+func (s *Store) observeQuery(ctx context.Context, name string, start time.Time) {
+	if s.instr == nil {
+		return
+	}
+	s.instr.RecordStoreQueryDuration(ctx, time.Since(start).Seconds(), name)
+}
 
 // User mirrors the `users` row.
 type User struct {
@@ -51,6 +73,7 @@ func (s *Store) UpsertUser(
 	appleSubject, email string,
 	isPrivateEmail bool,
 ) (*User, error) {
+	defer s.observeQuery(ctx, "upsert_user", time.Now())
 	if appleSubject == "" {
 		return nil, errors.New("store: apple_subject is required")
 	}
@@ -91,6 +114,7 @@ type SnoreEvent struct {
 // keyed on (user_id, client_event_id). Returns the number of rows
 // actually inserted (i.e. excluding silently-deduped rows).
 func (s *Store) InsertEvents(ctx context.Context, userID uuid.UUID, evs []SnoreEvent) (int, error) {
+	defer s.observeQuery(ctx, "insert_events", time.Now())
 	if len(evs) == 0 {
 		return 0, nil
 	}
@@ -149,6 +173,7 @@ func (s *Store) ListEvents(
 	cursor Cursor,
 	limit int,
 ) ([]SnoreEvent, error) {
+	defer s.observeQuery(ctx, "list_events", time.Now())
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
@@ -197,6 +222,7 @@ func (s *Store) RecordRefreshToken(
 	tokenID, userID, familyID uuid.UUID,
 	expiresAt time.Time,
 ) error {
+	defer s.observeQuery(ctx, "record_refresh_token", time.Now())
 	const q = `
 INSERT INTO refresh_tokens (token_id, user_id, family_id, expires_at)
 VALUES ($1, $2, $3, $4);
@@ -209,6 +235,7 @@ VALUES ($1, $2, $3, $4);
 
 // GetRefreshToken loads a refresh-token row by its token_id.
 func (s *Store) GetRefreshToken(ctx context.Context, tokenID uuid.UUID) (*RefreshToken, error) {
+	defer s.observeQuery(ctx, "get_refresh_token", time.Now())
 	const q = `
 SELECT token_id, user_id, family_id, issued_at, expires_at, revoked_at, replaced_by
 FROM refresh_tokens
@@ -238,6 +265,7 @@ func (s *Store) ReplaceRefreshToken(
 	oldID, newID, userID, familyID uuid.UUID,
 	expiresAt time.Time,
 ) error {
+	defer s.observeQuery(ctx, "replace_refresh_token", time.Now())
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin: %w", err)
@@ -285,6 +313,7 @@ func (s *Store) ReplaceRefreshToken(
 // given family as revoked. Used both at logout and after theft is
 // detected. Idempotent.
 func (s *Store) RevokeRefreshFamily(ctx context.Context, userID, familyID uuid.UUID) error {
+	defer s.observeQuery(ctx, "revoke_refresh_family", time.Now())
 	const q = `
 UPDATE refresh_tokens
 SET revoked_at = NOW()
@@ -300,6 +329,7 @@ WHERE user_id = $1 AND family_id = $2 AND revoked_at IS NULL;
 // revoked (e.g. at logout). Idempotent — a duplicate insert is not an
 // error.
 func (s *Store) RecordRevokedJTI(ctx context.Context, jti string, userID uuid.UUID) error {
+	defer s.observeQuery(ctx, "record_revoked_jti", time.Now())
 	const q = `
 INSERT INTO revoked_jti (jti, user_id) VALUES ($1, $2)
 ON CONFLICT (jti) DO NOTHING;
@@ -313,6 +343,7 @@ ON CONFLICT (jti) DO NOTHING;
 // IsJTIRevoked returns true if the given access-token JTI has been
 // recorded as revoked.
 func (s *Store) IsJTIRevoked(ctx context.Context, jti string) (bool, error) {
+	defer s.observeQuery(ctx, "is_jti_revoked", time.Now())
 	const q = `SELECT 1 FROM revoked_jti WHERE jti = $1;`
 	var one int
 	err := s.pool.QueryRow(ctx, q, jti).Scan(&one)
@@ -344,6 +375,7 @@ func (s *Store) DailySummaries(
 	tz string,
 	start, end time.Time,
 ) ([]DailySummary, error) {
+	defer s.observeQuery(ctx, "daily_summaries", time.Now())
 	if tz == "" {
 		tz = "UTC"
 	}
@@ -393,6 +425,7 @@ func (s *Store) TotalsSince(
 	userID uuid.UUID,
 	since time.Time,
 ) (*Totals, error) {
+	defer s.observeQuery(ctx, "totals_since", time.Now())
 	const q = `
 SELECT COUNT(*)::bigint                              AS event_count,
        COALESCE(SUM(duration_ms), 0)::bigint         AS total_ms,
@@ -424,6 +457,7 @@ func (s *Store) RecordExport(
 	bytesSent *int64,
 	statusCode int,
 ) error {
+	defer s.observeQuery(ctx, "record_export", time.Now())
 	const q = `
 INSERT INTO export_audit (user_id, format, bytes_sent, status_code)
 VALUES ($1, $2, $3, $4);
@@ -442,6 +476,7 @@ func (s *Store) CountExportsInWindow(
 	userID uuid.UUID,
 	since time.Time,
 ) (int, error) {
+	defer s.observeQuery(ctx, "count_exports_in_window", time.Now())
 	const q = `
 SELECT COUNT(*) FROM export_audit
 WHERE user_id = $1 AND requested_at > $2;
@@ -465,6 +500,7 @@ func (s *Store) OldestExportInWindow(
 	userID uuid.UUID,
 	since time.Time,
 ) (time.Time, error) {
+	defer s.observeQuery(ctx, "oldest_export_in_window", time.Now())
 	const q = `
 SELECT MIN(requested_at) FROM export_audit
 WHERE user_id = $1 AND requested_at > $2;

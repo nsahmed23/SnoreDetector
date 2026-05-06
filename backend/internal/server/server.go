@@ -16,6 +16,7 @@ import (
 	"github.com/nsahmed23/SnoreDetector/backend/internal/blobstore"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
@@ -52,6 +53,9 @@ type Deps struct {
 	Apple          *apple.Verifier
 	JWT            *authjwt.Issuer
 	RequestTimeout time.Duration
+	// Metrics is the service's instrument bundle. Nil is fine —
+	// every recorder method is nil-safe.
+	Metrics *metrics.Instruments
 	// Now lets tests freeze time. Defaults to time.Now.
 	Now func() time.Time
 
@@ -82,6 +86,9 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(d.RequestTimeout))
+	// Per-route handler-duration histogram. Nil-safe — short-circuits
+	// to a pass-through when Deps.Metrics is nil (i.e. unit tests).
+	r.Use(d.Metrics.HandlerDurationMiddleware)
 
 	r.Get("/healthz", healthHandler(d))
 

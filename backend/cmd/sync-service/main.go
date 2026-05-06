@@ -37,6 +37,7 @@ import (
 	"github.com/nsahmed23/SnoreDetector/backend/internal/blobstore"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/config"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	otelsetup "github.com/nsahmed23/SnoreDetector/backend/internal/otel"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/server"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
@@ -76,6 +77,11 @@ func run() error {
 		}
 	}()
 
+	instr, err := metrics.New(serviceName)
+	if err != nil {
+		return err
+	}
+
 	// Run migrations on a single non-pooled connection.
 	migConn, err := store.AcquireConn(rootCtx, cfg.DatabaseURL)
 	if err != nil {
@@ -94,7 +100,7 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
-	st := store.New(pool)
+	st := store.New(pool).WithMetrics(instr)
 
 	verifier, err := apple.New(rootCtx, cfg.AppleAudience, cfg.AppleIssuer)
 	if err != nil {
@@ -110,6 +116,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	jwtIss.WithMetrics(instr)
 
 	blob, err := buildBlobstore(cfg)
 	if err != nil {
@@ -125,6 +132,7 @@ func run() error {
 		BlobStore:         blob,
 		AudioMaxClipBytes: cfg.AudioMaxClipBytes,
 		AudioAllowedMIME:  cfg.AudioAllowedMIME,
+		Metrics:           instr,
 	})
 
 	srv := &http.Server{

@@ -9,7 +9,7 @@
 #   sync-service       :8080
 #   analytics-service  :8081
 #   export-service     :8082
-#   otel-collector     :4318 (OTLP HTTP), :4317 (OTLP gRPC)
+#   otel-collector     :4318 (OTLP HTTP), :4317 (OTLP gRPC), :9464 (Prometheus scrape)
 
 services:
   postgres:
@@ -37,6 +37,7 @@ services:
     ports:
       - "4317:4317" # OTLP gRPC
       - "4318:4318" # OTLP HTTP
+      - "9464:9464" # Prometheus scrape (curl localhost:9464/metrics)
 
   sync-service:
     profiles: ["app"]
