@@ -78,6 +78,17 @@ npm run dev
   (`rust-core-skeleton`, `ios-record-tab`, `ios-healthkit`, `backend-sync`,
   `backend-analytics-export`).
 
+## App Store submission
+
+Pre-submission paperwork lives under [`docs/APP_STORE/`](docs/APP_STORE/):
+
+- [Privacy nutrition labels](docs/APP_STORE/PRIVACY_LABELS.md)
+- [Listing metadata](docs/APP_STORE/METADATA.md)
+- [Screenshots plan](docs/APP_STORE/SCREENSHOTS_PLAN.md)
+- [TestFlight checklist](docs/APP_STORE/TESTFLIGHT_CHECKLIST.md)
+
+App icon master + launch placeholder live under [`assets/`](assets/).
+
 ## iOS context note
 
 The prototype is designed with iOS mechanics in mind: the recording flow
