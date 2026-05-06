@@ -31,6 +31,7 @@ final class RecorderViewModel: ObservableObject {
     private let log = Logger(subsystem: "com.snoreguard.app", category: "Recorder")
     private let settingsStore: SettingsStore
     private let engine: AudioEngine
+    private let healthRecorder: HealthRecorder
     private var core: SnoreCore?
     private var pollTimer: AnyCancellable?
     private var settingsCancellable: AnyCancellable?
@@ -46,9 +47,11 @@ final class RecorderViewModel: ObservableObject {
     private var engineDelegateProxy: AudioEngineProxy?
 
     init(settingsStore: SettingsStore,
-         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize)) {
+         engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize),
+         healthRecorder: HealthRecorder = HealthStore()) {
         self.settingsStore = settingsStore
         self.engine = engine
+        self.healthRecorder = healthRecorder
 
         // Forward live settings changes into the running detector.
         self.settingsCancellable = settingsStore.$settings
@@ -114,6 +117,7 @@ final class RecorderViewModel: ObservableObject {
         if let inFlight = core?.finish() {
             session?.events.append(inFlight)
             eventCount += 1
+            forwardToHealthIfEnabled(inFlight)
         }
 
         if var s = session {
@@ -122,6 +126,11 @@ final class RecorderViewModel: ObservableObject {
         }
         core = nil
         state = .stopped
+
+        // Phase C: optional one-shot session write to Apple Health
+        // (HKCategorySample, sleepAnalysis = inBed). Best-effort —
+        // we don't surface failures to the UI.
+        forwardSessionToHealthIfEnabled(session)
     }
 
     // MARK: - Frame processing
@@ -146,6 +155,35 @@ final class RecorderViewModel: ObservableObject {
         while let ev = core.pollEvent() {
             session?.events.append(ev)
             eventCount += 1
+            forwardToHealthIfEnabled(ev)
+        }
+    }
+
+    private func forwardToHealthIfEnabled(_ ev: SnoreEvent) {
+        guard settingsStore.writeSoundLevelsToHealth,
+              let session = session else { return }
+        Task.detached { [healthRecorder, session] in
+            await healthRecorder.record(event: ev, sessionStartedAt: session.startedAt)
+        }
+    }
+
+    /// Phase C addition: write the entire session window as a single
+    /// `HKCategorySample` of type sleepAnalysis with value `.inBed`
+    /// when the user has the corresponding toggle on. Always inBed —
+    /// SnoreGuard never infers REM/core/deep stages from microphone
+    /// data.
+    private func forwardSessionToHealthIfEnabled(_ s: RecordingSession?) {
+        guard settingsStore.writeSessionsToHealth, let s = s else { return }
+        // The legacy HealthRecorder protocol used by tests doesn't
+        // know about session writes; the production HealthStore
+        // also conforms to HealthKitClient where the method exists.
+        guard let client = healthRecorder as? HealthKitClient else { return }
+        Task.detached { [client, s] in
+            do {
+                try await client.writeSessionSample(session: s)
+            } catch {
+                // Best-effort; HK writes are not surfaced to the UI.
+            }
         }
     }
 

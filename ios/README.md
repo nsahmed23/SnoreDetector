@@ -35,12 +35,16 @@ ios/
 │   │   ├── LevelMeterView.swift
 │   │   ├── DisclaimerBanner.swift
 │   │   └── ConsentSheet.swift
+│   ├── Health/
+│   │   └── HealthStore.swift         HKHealthStore wrapper (phase 3)
 │   ├── Persistence/
 │   │   └── SettingsStore.swift       UserDefaults-backed
+│   ├── SnoreGuard.entitlements       HealthKit capability
 │   └── Resources/Assets.xcassets/    AppIcon + AccentColor placeholders
 └── SnoreGuardTests/
     ├── SnoreCoreTests.swift          FFI lifecycle + sustained-input event
-    └── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    ├── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    └── HealthRecorderTests.swift     fake HealthRecorder + authorization model
 ```
 
 ## Build flow
@@ -127,10 +131,26 @@ Audio session:
       device, observe that detection continues (the `audio` background
       mode is enabled).
 
+## HealthKit (phase 3)
+
+- Entitlement: `SnoreGuard/SnoreGuard.entitlements` declares
+  `com.apple.developer.healthkit`. You'll need to add HealthKit
+  to the app's capabilities in your Apple Developer account before
+  building for a device.
+- Authorization is requested **only** when the user toggles on
+  "Sync to Apple Health" in Settings. We never request HealthKit
+  permission silently or on launch.
+- Writes: `HKQuantityType(.environmentalAudioExposure)` samples in
+  `dBASPL`, with metadata flagging that the dB values are
+  **uncalibrated**. The Health app's "Show All Data" view will
+  surface that metadata for any user who looks.
+- Reads: `HKCategoryType(.sleepAnalysis)` — granted but unused in
+  this phase. Phase 5 analytics will correlate snore events with
+  sleep stages.
+
 ## Out of scope (future phases)
 
 - **Persistent history** (Core Data / SwiftData) — phase 5 of the port plan.
-- **HealthKit** read/write — phase 3 (`claude/ios-healthkit`).
 - **Backend sync** (the Go services in `backend/`) — phase 4/5
   already shipped on the backend side; the iOS network client lands
   in a follow-up.
