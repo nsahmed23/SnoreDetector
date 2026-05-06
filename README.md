@@ -1,5 +1,11 @@
 # SnoreGuard (SnoreDetector)
 
+[![Rust core](https://github.com/nsahmed23/SnoreDetector/actions/workflows/rust.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/rust.yml)
+[![Go backend](https://github.com/nsahmed23/SnoreDetector/actions/workflows/go.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/go.yml)
+[![Go integration](https://github.com/nsahmed23/SnoreDetector/actions/workflows/integration.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/integration.yml)
+[![Web prototype](https://github.com/nsahmed23/SnoreDetector/actions/workflows/web.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/web.yml)
+[![iOS app](https://github.com/nsahmed23/SnoreDetector/actions/workflows/ios.yml/badge.svg)](https://github.com/nsahmed23/SnoreDetector/actions/workflows/ios.yml)
+
 A smart, mobile-first snore monitoring application prototype built with React, TypeScript, and Tailwind CSS. SnoreGuard intelligently tracks your snoring while ignoring background noises like audiobooks or fans, integrates with Apple HealthKit, and provides rich insights into your sleep habits.
 
 ## 🌟 Features

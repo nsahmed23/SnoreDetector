@@ -1,0 +1,21 @@
+name: iOS app
+
+on:
+  push:
+    branches: [main]
+    paths: ['ios/**', 'rust-core/**', '.github/workflows/ios.yml']
+  pull_request:
+    paths: ['ios/**', 'rust-core/**', '.github/workflows/ios.yml']
+
+jobs:
+  ios-verification-deferred:
+    name: iOS verification (deferred to macOS runner)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip
+        run: |
+          echo "iOS verification requires a macOS runner with Xcode 15+."
+          echo "This stub keeps the workflow file present so iOS PRs reference"
+          echo "a known job name; swap runs-on to macos-14 and add the xcodebuild"
+          echo "steps once macOS runners are available in this org."
+          exit 0

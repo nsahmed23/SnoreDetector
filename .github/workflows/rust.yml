@@ -1,0 +1,31 @@
+name: Rust core
+
+on:
+  push:
+    branches: [main]
+    paths: ['rust-core/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust-core/**', '.github/workflows/rust.yml']
+
+jobs:
+  test:
+    name: cargo test + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-core/snoreguard-core
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6
+        with:
+          workspaces: rust-core/snoreguard-core
+      - name: cargo test
+        run: cargo test --all-features
+      - name: cargo build --release
+        run: cargo build --release
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings

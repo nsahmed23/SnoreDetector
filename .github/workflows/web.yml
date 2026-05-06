@@ -1,0 +1,25 @@
+name: Web prototype
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'package.json', 'package-lock.json', 'vite.config.ts', 'tsconfig.json', 'index.html', '.github/workflows/web.yml']
+  pull_request:
+    paths: ['src/**', 'package.json', 'package-lock.json', 'vite.config.ts', 'tsconfig.json', 'index.html', '.github/workflows/web.yml']
+
+jobs:
+  build:
+    name: lint + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b
+        with:
+          node-version: 20
+          cache: npm
+      - name: npm ci
+        run: npm ci
+      - name: tsc --noEmit
+        run: npm run lint
+      - name: vite build
+        run: npm run build
