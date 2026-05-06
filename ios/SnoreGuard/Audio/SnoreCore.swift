@@ -17,8 +17,8 @@
 import Foundation
 import SnoreGuardCore
 
-/// Errors thrown by `SnoreCore`. Mirrors the negative `SgStatus` codes
-/// from the Rust ABI plus a Swift-side allocation-failure case.
+/// Errors thrown by `SnoreCore`. Mirrors the negative `SG_STATUS_*`
+/// codes from the Rust ABI plus a Swift-side allocation-failure case.
 enum SnoreCoreError: Error, Equatable {
     /// `sg_detector_new` returned NULL — the only documented cause is
     /// a zero `sample_rate_hz`.
@@ -101,15 +101,15 @@ final class SnoreCore {
         return try samples.withUnsafeBufferPointer { buf -> Bool in
             let status = sg_detector_push_frame(pointer, buf.baseAddress, buf.count)
             switch status {
-            case Int32(SgStatus.Ok.rawValue):
+            case SG_STATUS_OK:
                 return false
-            case Int32(SgStatus.EventReady.rawValue):
+            case SG_STATUS_EVENT_READY:
                 return true
-            case Int32(SgStatus.NullPointer.rawValue):
+            case SG_STATUS_NULL_POINTER:
                 throw SnoreCoreError.nullPointer
-            case Int32(SgStatus.InvalidLength.rawValue):
+            case SG_STATUS_INVALID_LENGTH:
                 throw SnoreCoreError.invalidLength(expected: SnoreCore.frameSize, got: samples.count)
-            case Int32(SgStatus.InvalidArgument.rawValue):
+            case SG_STATUS_INVALID_ARGUMENT:
                 throw SnoreCoreError.invalidArgument
             default:
                 throw SnoreCoreError.unknown(code: status)
@@ -122,6 +122,17 @@ final class SnoreCore {
     func pollEvent() -> SnoreEvent? {
         var raw = SgEvent()
         let polled = sg_detector_poll_event(pointer, &raw)
+        guard polled == 1 else { return nil }
+        return SnoreEvent(startMs: raw.start_ms, durationMs: raw.duration_ms, avgDB: raw.avg_db)
+    }
+
+    /// Flush any in-flight event before stopping. Call this from
+    /// `RecorderViewModel.stop()` so events that were active when the
+    /// user tapped Stop don't get dropped. Mirrors `pollEvent()`'s
+    /// convention: returns the in-flight event if any, `nil` otherwise.
+    func finish() -> SnoreEvent? {
+        var raw = SgEvent()
+        let polled = sg_detector_finish(pointer, &raw)
         guard polled == 1 else { return nil }
         return SnoreEvent(startMs: raw.start_ms, durationMs: raw.duration_ms, avgDB: raw.avg_db)
     }
@@ -141,11 +152,11 @@ final class SnoreCore {
 
     private static func translateStatus(_ status: Int32) throws {
         switch status {
-        case Int32(SgStatus.Ok.rawValue):
+        case SG_STATUS_OK:
             return
-        case Int32(SgStatus.NullPointer.rawValue):
+        case SG_STATUS_NULL_POINTER:
             throw SnoreCoreError.nullPointer
-        case Int32(SgStatus.InvalidArgument.rawValue):
+        case SG_STATUS_INVALID_ARGUMENT:
             throw SnoreCoreError.invalidArgument
         default:
             throw SnoreCoreError.unknown(code: status)

@@ -36,11 +36,14 @@ final class RecorderViewModel: ObservableObject {
     private var settingsCancellable: AnyCancellable?
     private var stateCancellable: AnyCancellable?
 
-    /// Lock for the SnoreCore — the engine pushes frames on its render
-    /// thread, the UI polls on main. Confining all FFI calls to the
-    /// main actor avoids the lock in this phase; if profiling shows
-    /// the main hop is a bottleneck, move the FFI to a serial queue.
-    private weak var engineDelegateProxy: AudioEngineProxy?
+    /// Strong reference to the proxy that bridges the audio render
+    /// thread to the main actor. `AudioEngine.delegate` is `weak`
+    /// (correct shape for a delegate), so the *owner* — this VM —
+    /// must hold the proxy alive for the duration of recording. A
+    /// previous version used `weak var` here, which let the proxy
+    /// deallocate immediately after `start()` returned, silently
+    /// dropping every audio frame.
+    private var engineDelegateProxy: AudioEngineProxy?
 
     init(settingsStore: SettingsStore,
          engine: AudioEngine = AudioEngine(frameSize: SnoreCore.frameSize)) {
@@ -100,7 +103,19 @@ final class RecorderViewModel: ObservableObject {
     func stop() {
         engine.stop()
         engine.delegate = nil
+        engineDelegateProxy = nil
         stopPollTimer()
+
+        // Drain any queued events first.
+        drainEvents()
+
+        // Then flush the in-flight event (if any) so a stop mid-snore
+        // doesn't drop the event the detector was building.
+        if let inFlight = core?.finish() {
+            session?.events.append(inFlight)
+            eventCount += 1
+        }
+
         if var s = session {
             s.endedAt = .now
             session = s

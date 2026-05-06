@@ -67,6 +67,29 @@ final class SnoreCoreTests: XCTestCase {
         XCTAssertNotNil(core.pollEvent())
     }
 
+    func testFinish_FlushesInFlightEvent() throws {
+        let core = try SnoreCore(thresholdDB: 35, sensitivity: .high)
+        let frame = lowFreqFrame()
+        // Push enough sustained low-freq frames to enter an event but
+        // do NOT push a silent frame (which would normally end it).
+        for _ in 0..<60 {
+            _ = try core.pushFrame(frame)
+        }
+        // Without finish(), the event would be lost.
+        let ev = core.finish()
+        XCTAssertNotNil(ev)
+        XCTAssertGreaterThan(ev!.durationMs, 0)
+    }
+
+    func testFinish_WhenIdleReturnsNil() throws {
+        let core = try SnoreCore(thresholdDB: 35, sensitivity: .high)
+        let silent = [Float](repeating: 0, count: SnoreCore.frameSize)
+        for _ in 0..<10 {
+            _ = try core.pushFrame(silent)
+        }
+        XCTAssertNil(core.finish())
+    }
+
     // MARK: - Helpers
 
     private func lowFreqFrame(freq: Float = 100, sampleRate: Float = 16_000) -> [Float] {
