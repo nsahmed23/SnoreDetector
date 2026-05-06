@@ -18,30 +18,29 @@ Track snoring patterns with a frequency-aware heuristic detector. All audio stay
 
 **How it works**
 
-A small Rust algorithm runs on your phone, scanning short audio frames for two things: enough volume to cross your threshold, and a low-frequency dominance pattern characteristic of snoring (which lets it ignore broadband noise like fans, audiobooks, or HVAC). When both conditions hold for about a quarter-second, it counts an event. That's the whole detector — no AI, no cloud inference, no audio leaving your phone.
+A small Rust algorithm runs on your phone. It scans short audio frames for two things: enough volume to cross your threshold, and a low-frequency dominance pattern characteristic of snoring (which lets it ignore broadband noise like fans, audiobooks, or HVAC). When both conditions hold for about a quarter-second, it counts a snore-like event. That's the whole detector — no AI, no cloud inference, no audio leaving your phone unless you explicitly opt in to cloud sync.
 
 **What you get**
 
 - A live recording view with a level meter, threshold marker, and event counter.
-- History of every session: per-night and per-week trends.
-- Optional Apple Health integration for correlation with your sleep stages.
-- Optional cross-device sync so you can review last night on your iPad.
-- CSV / JSON export for personal records or doctor visits.
-
-**What it isn't**
-
-This is **not** a medical device. It does not screen for sleep apnea, UARS, or any other condition. It's a wellness tool. If you're worried about your breathing during sleep, see a clinician — no app substitutes for a real polysomnography.
+- Persistent history of every session: per-night and per-week trends.
+- Optional Apple Health integration with three independent toggles: read sleep stages (correlate with detected events on-device), write SnoreGuard sessions as inBed samples, write estimated sound levels as uncalibrated audio-exposure samples. Each toggle defaults off.
+- Optional cloud sync via Sign in with Apple — sessions, snore-like events, and (separately opt-in) audio clips around events sync to your account so you can review last night on another device.
+- CSV / JSON export of session and event metadata, with optional binary clip download.
+- Honest, conservative disclosure copy. SnoreGuard is not a medical device; it doesn't diagnose anything.
 
 **Privacy**
 
-- Audio is processed on-device, never recorded or uploaded.
-- Sign in with Apple is the only sign-in method.
-- The optional sync feature transmits only event metadata (timestamps, duration, average noise level), never audio.
-- HealthKit access is opt-in; the calibration disclaimer for written values is in every sample's metadata. Read access (sleep stages) is read-only — we never modify your sleep data.
+- Audio is processed on-device. Never recorded or uploaded unless you explicitly enable both the Cloud sync and Upload audio clips toggles.
+- Sign in with Apple is the only sign-in method. No passwords. No email collection unless you choose to share it through Apple's flow.
+- HealthKit access is opt-in per direction (read vs write). Revoke any combination at any time from iOS Settings → Health.
+- All values written to Apple Health are flagged as estimated, uncalibrated, and not diagnostic.
+- The app never infers REM, core, or deep sleep stages from microphone data.
+- Telemetry (when enabled by the operator) excludes raw audio, raw user IDs, and tokens.
 
-**Open-source**
+**Open source**
 
-The algorithm, the iOS app, and the backend are all available under MIT on GitHub. See the link below.
+The iOS app, the Rust detector core, and the Go backend services are all available on GitHub under MIT.
 
 ## Keywords (100 chars total, comma-separated, no spaces)
 snore,sleep,sleeptracking,snoring,monitor,sleeptracker,ambient,health,bedroom,record
@@ -88,4 +87,5 @@ v0.x.0
 
 - `PRIVACY_LABELS.md` for the privacy nutrition label answers.
 - `SCREENSHOTS_PLAN.md` for what each screenshot must show.
-- `../DISCLAIMER.md` for the in-app legal copy this listing must stay consistent with.
+- [../PORTFOLIO_NARRATIVE.md](../PORTFOLIO_NARRATIVE.md) — long-form narrative for the project (links the listing copy back to the engineering story).
+- [../DISCLAIMER.md](../DISCLAIMER.md) for the in-app legal copy this listing must stay consistent with.

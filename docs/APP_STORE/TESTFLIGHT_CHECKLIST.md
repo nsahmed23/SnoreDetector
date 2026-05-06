@@ -36,12 +36,20 @@ Use this as the running checklist when you sit down at a Mac with Xcode 15+ for 
 - [ ] Audio path verified: tap on a real microphone, see the level meter respond.
 - [ ] Lock-screen test: start recording, lock the device, observe detection continues (the `audio` background mode is enabled).
 
-## 5. HealthKit (medium friction — depends on PR #6 decision)
+## 5. HealthKit (medium friction — three independent toggles)
 
-- [ ] Confirm option (a/b/c/d) from PR #6's "Decisions needed" section.
-- [ ] If (a): add the entitlement to the App ID, smoke test the toggle flow, verify a sample lands in Health.app.
-- [ ] If (c — recommended): drop the write capability from the entitlement, keep the read scope, smoke test the toggle.
-- [ ] Either way: confirm the disclaimer in `DISCLAIMER.md` matches the actual write/read behavior.
+- [ ] Add the entitlement to the App ID with both read and write scopes.
+- [ ] Confirm the disclaimer in `DISCLAIMER.md` matches the actual write/read behavior.
+
+## 5a. HealthKit r/w smoke test
+- [ ] Settings → enable "Read sleep stages" — system permission sheet appears with read-only request
+- [ ] Settings → enable "Write SnoreGuard sessions" — system permission sheet appears with write-session-only request
+- [ ] Settings → enable "Write estimated sound levels" — write-audio-exposure permission requested
+- [ ] Run a 1-min recording with all three toggles on; confirm:
+  - sessionWrites lands in Health.app under Sleep → "SnoreGuard"
+  - per-event sound-level samples land under Hearing → Environmental Sound Levels
+  - sleep stages from Health are visible in History (correlation badges)
+- [ ] Toggle off "Write sessions" → record again → no new sleep-analysis sample
 
 ## 6. Backend smoke test (low friction if local; medium if cloud)
 
@@ -49,6 +57,33 @@ Use this as the running checklist when you sit down at a Mac with Xcode 15+ for 
 - [ ] From the iPhone (on the same Wi-Fi as the dev Mac), point `APIClient.base = "http://<mac-IP>:8080"`.
 - [ ] Sign in via the Sign in with Apple button — confirm `/auth/apple` returns access + refresh tokens.
 - [ ] Push a synthetic event, list it back via `/events`.
+
+## 6a. Cloud sync smoke test
+- [ ] Settings → toggle "Cloud sync" on — Sign in with Apple sheet appears
+- [ ] Sign in; backend (`make run-sync`) logs an /auth/apple POST with 200 + token pair
+- [ ] Record a 30-second session; stop
+- [ ] Backend logs show POST /sessions and POST /events with 200
+- [ ] Reinstall app, sign in again, History tab shows the previously-recorded session
+
+## 6b. Audio clip upload smoke test
+- [ ] Settings → enable "Upload audio clips" (cloud sync must already be on)
+- [ ] Record a session that includes a real snore-like sound; stop
+- [ ] Backend logs show POST /audio/clips with 200; sha256 verification passed
+- [ ] History → tap session → tap a clip → playback works (or "v1.1" placeholder if playback wasn't included)
+- [ ] Health-app cross-check: per-event sound-level samples appear at the matching timestamps
+
+## 6c. Export-with-clips smoke test
+- [ ] curl with bearer token: `curl 'http://<mac-ip>:8082/export/events.json?include=sessions,clips' -H 'Authorization: Bearer $TOKEN' | jq .`
+- [ ] Response has events, sessions, and clips arrays plus a count object
+- [ ] Confirm clip metadata includes object_key (UUID-derived, never a user-provided string)
+- [ ] Optionally download a clip via `GET /audio/clips/{id}/download`; bytes match the local file
+
+## 6d. Deletion + privacy controls smoke test
+- [ ] History → delete a clip → confirm:
+  - local file at `app-support/audio/<id>.m4a` is removed
+  - backend POST shows DELETE /audio/clips/{id} with 200
+  - subsequent GET /audio/clips/{id}/download returns 404
+- [ ] Settings → log out → confirm tokens removed from Keychain (no further sync attempts)
 
 ## 7. App Store Connect submission (high friction first time)
 
@@ -68,7 +103,12 @@ Use this as the running checklist when you sit down at a Mac with Xcode 15+ for 
 
 These must be resolved before clicking "Submit for review":
 
-- **HealthKit type-misuse decision** (PR #6 options a/b/c/d).
+- **Privacy policy URL** — needs to be live. Recommendation: a GitHub Pages render of `../PRIVACY_AND_DATA_LIFECYCLE.md` (Phase A doc).
 - **`@google/genai` keep or drop** in `package.json` (PR #1 follow-up issue) — does not affect iOS submission directly but matters for the public web prototype.
-- **Privacy policy URL** — needs to be live (suggestion: a GitHub Pages render of `DISCLAIMER.md`).
-- **Crash reporting backend** — Crashlytics vs Apple-only.
+
+The HealthKit r/w decision (full r/w with three opt-in toggles) and the crash-reporting decision (Apple-only for v1) are resolved — see `PRIVACY_LABELS.md`.
+
+## See also
+
+- [../RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md) — full release checklist (Phase H sibling doc).
+- [../MAC_QUICKSTART.md](../MAC_QUICKSTART.md) — first-Mac-session quickstart (Phase H sibling doc).
