@@ -26,6 +26,12 @@ ios/
 │   ├── Models/
 │   │   ├── DetectorSettings.swift
 │   │   └── RecordingSession.swift
+│   ├── Networking/                   sync-service client (phase 2-B)
+│   │   ├── Endpoints.swift           typed Endpoint protocol + concrete endpoints
+│   │   ├── APIClient.swift           actor-isolated URLSession client + retry/refresh
+│   │   ├── AuthManager.swift         Sign in with Apple, single-flight refresh
+│   │   ├── TokenKeychain.swift       SecItem wrapper for access + refresh tokens
+│   │   └── EventSync.swift           upload/pull coordinator
 │   ├── ViewModels/
 │   │   └── RecorderViewModel.swift   @MainActor; wires engine ↔ core ↔ UI
 │   ├── Views/
@@ -40,7 +46,9 @@ ios/
 │   └── Resources/Assets.xcassets/    AppIcon + AccentColor placeholders
 └── SnoreGuardTests/
     ├── SnoreCoreTests.swift          FFI lifecycle + sustained-input event
-    └── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    ├── DetectorSettingsTests.swift   slider snap + sensitivity rawValues
+    └── Networking/
+        └── APIClientTests.swift      URLProtocol-mocked happy path, 401-retry, 429, single-flight
 ```
 
 ## Build flow
@@ -104,6 +112,98 @@ Audio session:
   user's alarm can still play and we don't kick out other audio.
 - `audio` is the only entry in `UIBackgroundModes` for now —
   `processing` / `remote-notification` etc. land in later phases.
+
+## Networking
+
+Phase 2-B adds the iOS client for the merged Phase-1 sync-service
+(`backend/cmd/sync-service`). All network code lives under
+`SnoreGuard/Networking/`. The auth flow:
+
+1. **Sign in with Apple** — `AuthManager.signIn(with:)` takes an
+   `ASAuthorizationAppleIDCredential`, extracts its `identityToken`
+   (an Apple-signed JWT), and POSTs it to `/auth/apple`. The backend
+   verifies the token against Apple's JWKS and responds with our own
+   access + refresh token pair.
+2. **Token storage** — Both tokens, the user ID, and the access-token
+   expiry land in the iOS Keychain via `TokenKeychain`. We use direct
+   `SecItem*` calls (no third-party wrapper) with
+   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` so tokens
+   survive backgrounding but never roam via iCloud Keychain.
+3. **Auto-refresh** — `APIClient.request` attaches `Authorization:
+   Bearer <access>` for any endpoint with `requiresAuth: true`. On
+   `401` the client calls `AuthManager.refresh()` once and replays
+   the original request. Pre-emptively, `currentAccessToken()` will
+   trigger a refresh if the cached token expires within the next 60 s.
+4. **Single-flight refresh** — Concurrent callers that all see a 401
+   coalesce on a single `Task<AuthTokensResponse, Error>` cached on
+   the `AuthManager`. This prevents two refreshes burning two refresh
+   tokens (and triggering the backend's family-revocation theft
+   detection on the loser).
+5. **Sign-out** — Best-effort POST to `/auth/logout` (revokes access
+   JTI + refresh family server-side), then Keychain wipe regardless
+   of network outcome.
+
+The non-auth surface:
+
+- `EventSync.upload(events:sessionStartedAt:)` — converts in-memory
+  `[SnoreEvent]` (relative `start_ms`) to `[WireSnoreEvent]`
+  (absolute `started_at`) and bulk-POSTs to `/events`. Backend dedupes
+  on `client_event_id` so retries are no-ops.
+- `EventSync.pull(since:)` — pages through `GET /events?cursor=…`
+  using the backend's opaque compound cursor (`base64url(rfc3339nano +
+  "|" + uuid)`). Cursor is never parsed client-side.
+
+### Wire shapes
+
+| iOS type                    | JSON shape                                                                           |
+|-----------------------------|--------------------------------------------------------------------------------------|
+| `AuthTokensResponse`        | `{user_id, access_token, access_token_expires_at, refresh_token, refresh_token_expires_at}` |
+| `WireSnoreEvent`            | `{client_event_id, started_at, duration_ms, avg_db, session_id?}`                    |
+| `PostEventsResponse`        | `{inserted, received}`                                                               |
+| `ListEventsResponse`        | `{events: [...], next_cursor?}`                                                      |
+
+Dates use ISO8601; the decoder accepts both fractional-second
+(`2026-05-06T13:00:00.123456789Z`) and whole-second (`...:00Z`)
+forms because Go's `time.Time` JSON marshaller emits both.
+
+### Errors
+
+All non-2xx, non-429 responses surface as `APIError.server(statusCode,
+message)`. The `message` is decoded from the backend's standard
+`{"error": "..."}` envelope when available. 429 surfaces as
+`APIError.rateLimited(retryAfterSeconds:)` parsed from the
+`Retry-After` header.
+
+### Test approach
+
+`SnoreGuardTests/Networking/APIClientTests.swift` uses a
+`URLProtocol` stub (`MockURLProtocol`) registered on a custom
+`URLSessionConfiguration.ephemeral` — no live network. The cases:
+
+- `testAuthApple_HappyPath` — round-trips a 200 response, asserts
+  Keychain persistence and User-Agent / Content-Type header attachment.
+- `test401_TriggersRefreshOnce` — verifies that an authenticated call
+  receiving 401 fires exactly one refresh and replays the original
+  request (3 total HTTP hops).
+- `test429_ThrowsRateLimited` — asserts `Retry-After` parsing.
+- `testConcurrentRefresh_IsSingleFlight` — two concurrent 401-bound
+  requests coalesce on a single refresh round-trip.
+- `testServerErrorEnvelope_IsSurfaced` — `{"error": "..."}` body is
+  decoded into `APIError.server.message`.
+
+### Configuration
+
+`APIConfig.default` points at `http://localhost:8080` for local dev
+against `make run-sync` from `backend/`. Production base URL is a
+build-time concern; the default ships unchanged until we have a
+TestFlight build to point at.
+
+### Out of scope (this phase)
+
+- Wiring `RecorderViewModel` to call `EventSync.upload` on session
+  end — Phase 2-C will add the offline buffer + retry policy.
+- A persistent `EventStore` for the History tab to read pulled events.
+- Watch-app token sharing via `kSecAttrAccessGroup`.
 
 ## Verification checklist
 
