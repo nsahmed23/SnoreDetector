@@ -32,7 +32,7 @@ backend/
 │   ├── server/                      sync-service-specific handlers + router
 │   ├── analytics/                   analytics-service handlers
 │   ├── export/                      export-service handlers (streaming CSV/JSON)
-│   ├── blobstore/                   raw audio body storage (filesystem + fake; GCS/S3 stubbed)
+│   ├── blobstore/                   raw audio body storage (filesystem + fake + GCS; S3 stubbed)
 │   ├── httpkit/                     tiny shared JSON helpers
 │   ├── otel/                        OpenTelemetry setup, env-driven, no-op fallback
 │   └── config/                      env-driven configs for each service
@@ -340,8 +340,43 @@ Every service reads:
 | `JWT_REFRESH_TTL` | `1440h` | Refresh-token lifetime (60d) |
 | `AUDIO_MAX_CLIP_BYTES` | `5242880` (5 MiB) | Per-clip upload body cap (multipart envelope is `cap + 64KiB`). Anything larger returns 413. |
 | `AUDIO_ALLOWED_MIME` | `audio/m4a,audio/mp4,audio/wav,audio/aac` | Comma-separated MIME allowlist for clip uploads. Both the declared `Content-Type` and the sniffed body type must match. |
-| `BLOBSTORE_BACKEND` | `filesystem` | `filesystem` (production-ready local), `fake` (in-memory, tests only). `gcs`/`s3` are stubbed for ADR 0008. |
+| `BLOBSTORE_BACKEND` | `filesystem` | `filesystem` (production-ready local), `fake` (in-memory, tests only), `gcs` (v1 production — Google Cloud Storage). `s3` remains stubbed for ADR 0008. |
 | `BLOBSTORE_FS_ROOT` | `./var/blobstore` | When backend is `filesystem`, the directory clip bodies live under. |
+| `BLOBSTORE_GCS_BUCKET` | *(required when backend=gcs)* | GCS bucket name. The bucket must be **uniform-IAM** and **private** — no public objects. |
+| `BLOBSTORE_GCS_PREFIX` | `clips/` | Object key prefix. Trailing slash is added automatically. The full key is `<prefix><user_id>/<clip_uuid>`; nothing user-controlled flows into the key. |
+
+### Production blobstore (GCS)
+
+For v1 production, set `BLOBSTORE_BACKEND=gcs` and `BLOBSTORE_GCS_BUCKET=<your-bucket>`.
+
+**Credentials.** The Go client uses Application Default Credentials by
+default. On Cloud Run, attach a runtime service account with the
+roles below — no key file is needed. For local development against a
+real bucket, point `GOOGLE_APPLICATION_CREDENTIALS` at a
+service-account JSON file.
+
+**Least-privilege IAM.** Grant the runtime service account exactly
+these object-level permissions on the bucket:
+
+- `storage.objects.create`  (POST `/audio/clips`)
+- `storage.objects.get`     (GET `/audio/clips/{id}/download`)
+- `storage.objects.delete`  (DELETE `/audio/clips/{id}`)
+
+The custom role `storage.objectAdmin` covers all three; if you prefer
+a tighter custom role, those three permissions are the full set.
+Bucket-level admin / `storage.buckets.*` permissions are **not**
+required at runtime — bucket creation and lifecycle policy are an
+infra-time concern.
+
+**Bucket hardening.**
+
+- Uniform bucket-level access (UBLA): on. ACLs are off.
+- Public access prevention: enforced.
+- Object lifecycle policy: 30-day default retention (matches the
+  privacy commitment in `docs/PRIVACY_AND_DATA_LIFECYCLE.md` once
+  added; not enforced by this code).
+- No signed URLs are issued by the service. Downloads stream through
+  the API so every read is subject to authn + per-user authorization.
 
 ### OpenTelemetry
 

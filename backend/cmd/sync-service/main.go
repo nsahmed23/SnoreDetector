@@ -16,8 +16,10 @@
 //   REQUEST_TIMEOUT   per-request timeout, default 15s
 //   AUDIO_MAX_CLIP_BYTES per-clip body cap, default 5*1024*1024 (5 MiB)
 //   AUDIO_ALLOWED_MIME comma-separated MIME allowlist for clip uploads
-//   BLOBSTORE_BACKEND  "filesystem" (default) | "fake" (tests only)
+//   BLOBSTORE_BACKEND  "filesystem" (default) | "fake" (tests only) | "gcs" (v1 prod)
 //   BLOBSTORE_FS_ROOT  filesystem-backend root, default "./var/blobstore"
+//   BLOBSTORE_GCS_BUCKET GCS bucket name (required when BLOBSTORE_BACKEND=gcs)
+//   BLOBSTORE_GCS_PREFIX GCS object key prefix, default "clips/"
 package main
 
 import (
@@ -111,7 +113,7 @@ func run() error {
 		return err
 	}
 
-	blob, err := buildBlobstore(cfg)
+	blob, err := buildBlobstore(rootCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -159,8 +161,9 @@ func run() error {
 // buildBlobstore picks the configured backend. We deliberately fail
 // closed on unknown / unimplemented backends so a typo in
 // BLOBSTORE_BACKEND can't quietly start the service with no cloud
-// storage attached. GCS/S3 are tracked under ADR 0008 for v1.1.
-func buildBlobstore(cfg *config.SyncService) (blobstore.Store, error) {
+// storage attached. GCS is the v1 production target (ADR 0008); S3
+// remains valid future work behind the same Store interface.
+func buildBlobstore(ctx context.Context, cfg *config.SyncService) (blobstore.Store, error) {
 	switch cfg.BlobstoreBackend {
 	case "filesystem", "":
 		if cfg.BlobstoreFSRoot == "" {
@@ -171,10 +174,19 @@ func buildBlobstore(cfg *config.SyncService) (blobstore.Store, error) {
 		// Allowed for local smoke / fuzz; in production env-var
 		// validation upstream should prevent this from leaking.
 		return blobstore.NewFake(), nil
-	case "gcs", "s3":
+	case "gcs":
+		// Prefix is normalized so callers don't have to remember the
+		// trailing-slash convention (BLOBSTORE_GCS_PREFIX="clips" and
+		// "clips/" both produce the same key shape).
+		gcs, err := blobstore.NewGCS(ctx, cfg.BlobstoreGCSBucket, blobstore.NormalizePrefix(cfg.BlobstoreGCSPrefix))
+		if err != nil {
+			return nil, fmt.Errorf("blobstore: %w", err)
+		}
+		return gcs, nil
+	case "s3":
 		return nil, fmt.Errorf("blobstore backend %q not implemented in this PR (see ADR 0008)", cfg.BlobstoreBackend)
 	default:
-		return nil, fmt.Errorf("unknown BLOBSTORE_BACKEND=%q (want filesystem|fake)", cfg.BlobstoreBackend)
+		return nil, fmt.Errorf("unknown BLOBSTORE_BACKEND=%q (want filesystem|fake|gcs)", cfg.BlobstoreBackend)
 	}
 }
 
