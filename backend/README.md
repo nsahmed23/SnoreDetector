@@ -20,7 +20,7 @@ backend/
 │   └── config/                      env-driven config loader
 ├── migrations/                      *.up.sql + embedded runner
 ├── sqlc/                            schema.sql + queries.sql for codegen
-└── sync-service/Dockerfile          distroless final image
+└── deploy/Dockerfile                distroless final image (sync-service)
 ```
 
 ## Quick start

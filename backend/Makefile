@@ -6,7 +6,8 @@ SHELL := /bin/bash
 TEST_DATABASE_URL ?= postgres://snoreguard:dev-only-password@localhost:5432/snoreguard?sslmode=disable
 
 build:
-	go build ./...
+	mkdir -p bin
+	go build -o bin/ ./cmd/...
 
 vet:
 	go vet ./...

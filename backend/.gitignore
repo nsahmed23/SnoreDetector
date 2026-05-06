@@ -1,6 +1,8 @@
 # Build output
 /bin/
+/sync-service
 /sync-service/sync-service
+/deploy/sync-service
 /cmd/sync-service/sync-service
 
 # Local env files (never commit secrets)

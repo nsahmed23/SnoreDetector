@@ -27,7 +27,7 @@ services:
     profiles: ["app"]
     build:
       context: .
-      dockerfile: sync-service/Dockerfile
+      dockerfile: deploy/Dockerfile
     environment:
       ADDR: ":8080"
       DATABASE_URL: postgres://snoreguard:dev-only-password@postgres:5432/snoreguard?sslmode=disable
