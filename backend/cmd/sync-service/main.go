@@ -14,11 +14,16 @@
 //   JWT_REFRESH_TTL   refresh token lifetime, default 1440h (60d)
 //   LOG_LEVEL         debug|info|warn|error, default info
 //   REQUEST_TIMEOUT   per-request timeout, default 15s
+//   AUDIO_MAX_CLIP_BYTES per-clip body cap, default 5*1024*1024 (5 MiB)
+//   AUDIO_ALLOWED_MIME comma-separated MIME allowlist for clip uploads
+//   BLOBSTORE_BACKEND  "filesystem" (default) | "fake" (tests only)
+//   BLOBSTORE_FS_ROOT  filesystem-backend root, default "./var/blobstore"
 package main
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,8 +34,10 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/apple"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/blobstore"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/config"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	otelsetup "github.com/nsahmed23/SnoreDetector/backend/internal/otel"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/server"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
@@ -70,6 +77,11 @@ func run() error {
 		}
 	}()
 
+	instr, err := metrics.New(serviceName)
+	if err != nil {
+		return err
+	}
+
 	// Run migrations on a single non-pooled connection.
 	migConn, err := store.AcquireConn(rootCtx, cfg.DatabaseURL)
 	if err != nil {
@@ -88,7 +100,7 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
-	st := store.New(pool)
+	st := store.New(pool).WithMetrics(instr)
 
 	verifier, err := apple.New(rootCtx, cfg.AppleAudience, cfg.AppleIssuer)
 	if err != nil {
@@ -104,13 +116,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	jwtIss.WithMetrics(instr)
+
+	blob, err := buildBlobstore(cfg)
+	if err != nil {
+		return err
+	}
 
 	handler := server.New(server.Deps{
-		Logger:         logger,
-		Store:          st,
-		Apple:          verifier,
-		JWT:            jwtIss,
-		RequestTimeout: cfg.RequestTimeout,
+		Logger:            logger,
+		Store:             st,
+		Apple:             verifier,
+		JWT:               jwtIss,
+		RequestTimeout:    cfg.RequestTimeout,
+		BlobStore:         blob,
+		AudioMaxClipBytes: cfg.AudioMaxClipBytes,
+		AudioAllowedMIME:  cfg.AudioAllowedMIME,
+		Metrics:           instr,
 	})
 
 	srv := &http.Server{
@@ -140,6 +162,28 @@ func run() error {
 	shutdownCtx, sCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer sCancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// buildBlobstore picks the configured backend. We deliberately fail
+// closed on unknown / unimplemented backends so a typo in
+// BLOBSTORE_BACKEND can't quietly start the service with no cloud
+// storage attached. GCS/S3 are tracked under ADR 0008 for v1.1.
+func buildBlobstore(cfg *config.SyncService) (blobstore.Store, error) {
+	switch cfg.BlobstoreBackend {
+	case "filesystem", "":
+		if cfg.BlobstoreFSRoot == "" {
+			return nil, errors.New("BLOBSTORE_FS_ROOT is required when BLOBSTORE_BACKEND=filesystem")
+		}
+		return blobstore.NewFilesystem(cfg.BlobstoreFSRoot), nil
+	case "fake":
+		// Allowed for local smoke / fuzz; in production env-var
+		// validation upstream should prevent this from leaking.
+		return blobstore.NewFake(), nil
+	case "gcs", "s3":
+		return nil, fmt.Errorf("blobstore backend %q not implemented in this PR (see ADR 0008)", cfg.BlobstoreBackend)
+	default:
+		return nil, fmt.Errorf("unknown BLOBSTORE_BACKEND=%q (want filesystem|fake)", cfg.BlobstoreBackend)
+	}
 }
 
 func newLogger(level string) *slog.Logger {

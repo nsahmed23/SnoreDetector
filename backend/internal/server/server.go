@@ -13,8 +13,10 @@ import (
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/apple"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/blobstore"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
@@ -35,6 +37,14 @@ type Store interface {
 	RevokeRefreshFamily(ctx context.Context, userID, familyID uuid.UUID) error
 	RecordRevokedJTI(ctx context.Context, jti string, userID uuid.UUID) error
 	IsJTIRevoked(ctx context.Context, jti string) (bool, error)
+
+	// Recording-session + audio-clip surface (Phase B).
+	UpsertSession(ctx context.Context, userID uuid.UUID, in store.RecordingSession) (*store.RecordingSession, bool, error)
+	ListSessions(ctx context.Context, userID uuid.UUID, cursor store.DescCursor, limit int) ([]store.RecordingSession, error)
+	UpsertAudioClip(ctx context.Context, userID uuid.UUID, in store.AudioClip) (*store.AudioClip, bool, error)
+	ListAudioClips(ctx context.Context, userID uuid.UUID, cursor store.DescCursor, limit int) ([]store.AudioClip, error)
+	GetAudioClip(ctx context.Context, userID, clipID uuid.UUID) (*store.AudioClip, error)
+	SoftDeleteAudioClip(ctx context.Context, userID, clipID uuid.UUID) error
 }
 
 type Deps struct {
@@ -43,8 +53,23 @@ type Deps struct {
 	Apple          *apple.Verifier
 	JWT            *authjwt.Issuer
 	RequestTimeout time.Duration
+	// Metrics is the service's instrument bundle. Nil is fine —
+	// every recorder method is nil-safe.
+	Metrics *metrics.Instruments
 	// Now lets tests freeze time. Defaults to time.Now.
 	Now func() time.Time
+
+	// BlobStore holds the raw audio bodies. Handlers fail closed
+	// (500) when this is nil but the route is hit; main.go MUST
+	// supply one.
+	BlobStore blobstore.Store
+	// AudioMaxClipBytes caps the per-clip body size. Zero falls back
+	// to 5 MiB inside the handler.
+	AudioMaxClipBytes int64
+	// AudioAllowedMIME is the whitelist of declared+sniffed
+	// content-types accepted on upload. Empty falls back to the
+	// default audio/m4a, audio/mp4, audio/wav, audio/aac set.
+	AudioAllowedMIME []string
 }
 
 // New constructs the chi router with all routes wired up.
@@ -61,6 +86,9 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(d.RequestTimeout))
+	// Per-route handler-duration histogram. Nil-safe — short-circuits
+	// to a pass-through when Deps.Metrics is nil (i.e. unit tests).
+	r.Use(d.Metrics.HandlerDurationMiddleware)
 
 	r.Get("/healthz", healthHandler(d))
 
@@ -80,6 +108,22 @@ func New(d Deps) http.Handler {
 		evH := &eventsHandler{deps: d}
 		r.With(ratelimit.PerUser(200, time.Minute)).Post("/events", evH.create)
 		r.With(ratelimit.PerUser(200, time.Minute)).Get("/events", evH.list)
+
+		// Phase B: recording sessions + audio clip cloud sync.
+		sessH := &sessionsHandler{deps: d}
+		r.With(ratelimit.PerUser(60, time.Minute)).Post("/sessions", sessH.create)
+		r.With(ratelimit.PerUser(60, time.Minute)).Get("/sessions", sessH.list)
+
+		clipH := &clipsHandler{deps: d}
+		// Upload is the heaviest call (bytes ingest + sha256 + blob
+		// write). Tighter cap than the read paths.
+		r.With(ratelimit.PerUser(30, time.Minute)).Post("/audio/clips", clipH.create)
+		r.With(ratelimit.PerUser(60, time.Minute)).Get("/audio/clips", clipH.list)
+		// Download is the most expensive read (full body egress);
+		// keep it on a per-hour budget so a runaway script can't
+		// drain a user's bandwidth allowance.
+		r.With(ratelimit.PerUser(10, time.Hour)).Get("/audio/clips/{id}/download", clipH.download)
+		r.With(ratelimit.PerUser(60, time.Minute)).Delete("/audio/clips/{id}", clipH.delete)
 	})
 
 	return r

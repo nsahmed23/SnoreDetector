@@ -21,23 +21,26 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/apple"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/blobstore"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
 
 // fakeStore is an in-memory Store for handler tests.
 type fakeStore struct {
-	mu             sync.Mutex
-	users          map[string]*store.User // keyed by apple_subject
-	events         []store.SnoreEvent
-	refreshTokens  map[uuid.UUID]*store.RefreshToken
-	revokedJTIs    map[string]uuid.UUID
-	upsertErr      error
-	insertErr      error
-	listErr        error
-	pingErr        error
-	upsertCalls    int
-	now            func() time.Time
+	mu            sync.Mutex
+	users         map[string]*store.User // keyed by apple_subject
+	events        []store.SnoreEvent
+	refreshTokens map[uuid.UUID]*store.RefreshToken
+	revokedJTIs   map[string]uuid.UUID
+	sessions      []store.RecordingSession
+	clips         []store.AudioClip
+	upsertErr     error
+	insertErr     error
+	listErr       error
+	pingErr       error
+	upsertCalls   int
+	now           func() time.Time
 }
 
 func newFakeStore() *fakeStore {
@@ -231,6 +234,165 @@ func (f *fakeStore) IsJTIRevoked(_ context.Context, jti string) (bool, error) {
 	return ok, nil
 }
 
+// --- Phase B: sessions + audio clips fake surface ---
+
+func (f *fakeStore) UpsertSession(_ context.Context, uid uuid.UUID, in store.RecordingSession) (*store.RecordingSession, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.sessions {
+		if f.sessions[i].UserID == uid && f.sessions[i].ClientSessionID == in.ClientSessionID {
+			s := &f.sessions[i]
+			if in.EndedAt != nil {
+				s.EndedAt = in.EndedAt
+			}
+			if in.DeviceName != "" {
+				s.DeviceName = in.DeviceName
+			}
+			if in.AppVersion != "" {
+				s.AppVersion = in.AppVersion
+			}
+			s.UpdatedAt = f.now()
+			cp := *s
+			return &cp, false, nil
+		}
+	}
+	row := store.RecordingSession{
+		ID:              uuid.New(),
+		UserID:          uid,
+		ClientSessionID: in.ClientSessionID,
+		StartedAt:       in.StartedAt,
+		EndedAt:         in.EndedAt,
+		DeviceName:      in.DeviceName,
+		AppVersion:      in.AppVersion,
+		CreatedAt:       f.now(),
+		UpdatedAt:       f.now(),
+	}
+	f.sessions = append(f.sessions, row)
+	cp := row
+	return &cp, true, nil
+}
+
+func (f *fakeStore) ListSessions(_ context.Context, uid uuid.UUID, cursor store.DescCursor, limit int) ([]store.RecordingSession, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mine := []store.RecordingSession{}
+	for _, s := range f.sessions {
+		if s.UserID != uid {
+			continue
+		}
+		mine = append(mine, s)
+	}
+	// Sort DESC by (started_at, id) so the fake matches the real
+	// store's ORDER BY started_at DESC, id DESC.
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].StartedAt.Equal(mine[j].StartedAt) {
+			return mine[i].StartedAt.After(mine[j].StartedAt)
+		}
+		return mine[i].ID.String() > mine[j].ID.String()
+	})
+	out := []store.RecordingSession{}
+	for _, s := range mine {
+		if !cursor.StartedAt.IsZero() || cursor.ID != uuid.Nil {
+			if !rowLess(s.StartedAt, s.ID, cursor.StartedAt, cursor.ID) {
+				continue
+			}
+		}
+		out = append(out, s)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) UpsertAudioClip(_ context.Context, uid uuid.UUID, in store.AudioClip) (*store.AudioClip, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.clips {
+		if f.clips[i].UserID == uid && f.clips[i].ClientClipID == in.ClientClipID {
+			cp := f.clips[i]
+			return &cp, false, nil
+		}
+	}
+	row := in
+	row.ID = uuid.New()
+	row.UserID = uid
+	row.UploadedAt = f.now()
+	f.clips = append(f.clips, row)
+	cp := row
+	return &cp, true, nil
+}
+
+func (f *fakeStore) ListAudioClips(_ context.Context, uid uuid.UUID, cursor store.DescCursor, limit int) ([]store.AudioClip, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mine := []store.AudioClip{}
+	for _, c := range f.clips {
+		if c.UserID != uid || c.DeletedAt != nil {
+			continue
+		}
+		mine = append(mine, c)
+	}
+	sort.Slice(mine, func(i, j int) bool {
+		if !mine[i].StartedAt.Equal(mine[j].StartedAt) {
+			return mine[i].StartedAt.After(mine[j].StartedAt)
+		}
+		return mine[i].ID.String() > mine[j].ID.String()
+	})
+	out := []store.AudioClip{}
+	for _, c := range mine {
+		if !cursor.StartedAt.IsZero() || cursor.ID != uuid.Nil {
+			if !rowLess(c.StartedAt, c.ID, cursor.StartedAt, cursor.ID) {
+				continue
+			}
+		}
+		out = append(out, c)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) GetAudioClip(_ context.Context, uid, clipID uuid.UUID) (*store.AudioClip, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.clips {
+		c := &f.clips[i]
+		if c.UserID == uid && c.ID == clipID && c.DeletedAt == nil {
+			cp := *c
+			return &cp, nil
+		}
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeStore) SoftDeleteAudioClip(_ context.Context, uid, clipID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.clips {
+		c := &f.clips[i]
+		if c.UserID == uid && c.ID == clipID && c.DeletedAt == nil {
+			now := f.now()
+			c.DeletedAt = &now
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+// rowLess compares (a_ts, a_id) < (b_ts, b_id) lexicographically.
+// The DESC-cursor pagination wants rows STRICTLY less than the cursor.
+func rowLess(at time.Time, aid uuid.UUID, bt time.Time, bid uuid.UUID) bool {
+	if at.Before(bt) {
+		return true
+	}
+	if at.After(bt) {
+		return false
+	}
+	return aid.String() < bid.String()
+}
+
 // helpers for building a fully-wired server
 type harness struct {
 	server *http.Server
@@ -239,6 +401,7 @@ type harness struct {
 	jwt    *authjwt.Issuer
 	apple  *apple.Verifier
 	priv   *rsa.PrivateKey
+	blob   *blobstore.Fake
 }
 
 func newHarness(t *testing.T) *harness {
@@ -262,12 +425,14 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("jwt.New: %v", err)
 	}
 	st := newFakeStore()
+	blob := blobstore.NewFake()
 	deps := Deps{
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Store:  st,
-		Apple:  v,
-		JWT:    iss,
-		Now:    func() time.Time { return time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC) },
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Store:     st,
+		Apple:     v,
+		JWT:       iss,
+		Now:       func() time.Time { return time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC) },
+		BlobStore: blob,
 	}
 	return &harness{
 		router: New(deps),
@@ -275,6 +440,7 @@ func newHarness(t *testing.T) *harness {
 		jwt:    iss,
 		apple:  v,
 		priv:   priv,
+		blob:   blob,
 	}
 }
 

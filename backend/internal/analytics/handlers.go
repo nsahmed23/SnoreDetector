@@ -12,13 +12,20 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nsahmed23/SnoreDetector/backend/internal/auth"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/httpkit"
 	authjwt "github.com/nsahmed23/SnoreDetector/backend/internal/jwt"
+	"github.com/nsahmed23/SnoreDetector/backend/internal/metrics"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/ratelimit"
 	"github.com/nsahmed23/SnoreDetector/backend/internal/store"
 )
+
+const tracerName = "snoreguard/analytics-service"
 
 // Store is the subset of *store.Store the handlers depend on.
 type Store interface {
@@ -33,6 +40,8 @@ type Deps struct {
 	Store          Store
 	JWT            *authjwt.Issuer
 	RequestTimeout time.Duration
+	// Metrics is the service's instrument bundle. Nil is fine.
+	Metrics *metrics.Instruments
 }
 
 // New builds the analytics router. Routes:
@@ -49,6 +58,7 @@ func New(d Deps) http.Handler {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(d.RequestTimeout))
+	r.Use(d.Metrics.HandlerDurationMiddleware)
 
 	r.Get("/healthz", health(d))
 
@@ -94,11 +104,21 @@ type dailySummaryResponse struct {
 }
 
 func (h *handler) dailySummary(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "analytics.summary",
+		trace.WithAttributes(
+			attribute.String("endpoint", "analytics.summary"),
+			semconv.HTTPRoute("/analytics/summary"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
 	q := r.URL.Query()
 	tz := q.Get("tz")
 	if tz == "" {
@@ -114,12 +134,17 @@ func (h *handler) dailySummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.deps.Store.DailySummaries(r.Context(), uid, tz, start, end)
+	rows, err := h.deps.Store.DailySummaries(ctx, uid, tz, start, end)
 	if err != nil {
 		h.deps.Logger.Error("daily summaries", "err", err.Error())
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusInternalServerError))
 		httpkit.Error(w, http.StatusInternalServerError, "failed to compute summaries")
 		return
 	}
+	span.SetAttributes(
+		attribute.Int("rows", len(rows)),
+		semconv.HTTPResponseStatusCode(http.StatusOK),
+	)
 	out := make([]dailyRow, 0, len(rows))
 	for _, d := range rows {
 		out = append(out, dailyRow{
@@ -143,11 +168,21 @@ type totalsResponse struct {
 }
 
 func (h *handler) totals(w http.ResponseWriter, r *http.Request) {
-	uid, ok := auth.UserIDFrom(r.Context())
+	ctx, span := otel.Tracer(tracerName).Start(r.Context(), "analytics.totals",
+		trace.WithAttributes(
+			attribute.String("endpoint", "analytics.totals"),
+			semconv.HTTPRoute("/analytics/totals"),
+		),
+	)
+	defer span.End()
+
+	uid, ok := auth.UserIDFrom(ctx)
 	if !ok {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusUnauthorized))
 		httpkit.Error(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	span.SetAttributes(attribute.String("user_id_hash", metrics.HashUserID(uid)))
 	since := time.Time{}
 	if s := r.URL.Query().Get("since"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
@@ -157,12 +192,14 @@ func (h *handler) totals(w http.ResponseWriter, r *http.Request) {
 		}
 		since = t
 	}
-	totals, err := h.deps.Store.TotalsSince(r.Context(), uid, since)
+	totals, err := h.deps.Store.TotalsSince(ctx, uid, since)
 	if err != nil {
 		h.deps.Logger.Error("totals", "err", err.Error())
+		span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusInternalServerError))
 		httpkit.Error(w, http.StatusInternalServerError, "failed to compute totals")
 		return
 	}
+	span.SetAttributes(semconv.HTTPResponseStatusCode(http.StatusOK))
 	httpkit.JSON(w, http.StatusOK, totalsResponse{
 		EventCount:      totals.EventCount,
 		TotalDurationMS: totals.TotalDurationMS,

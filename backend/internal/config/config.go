@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,12 @@ type SyncService struct {
 	JWTRefreshTTL    time.Duration
 	LogLevel         string
 	RequestTimeout   time.Duration
+
+	// Phase B: raw audio clip upload + storage backend.
+	AudioMaxClipBytes int64    // env AUDIO_MAX_CLIP_BYTES, default 5*1024*1024
+	AudioAllowedMIME  []string // env AUDIO_ALLOWED_MIME, default "audio/m4a,audio/mp4,audio/wav,audio/aac"
+	BlobstoreBackend  string   // env BLOBSTORE_BACKEND, default "filesystem"
+	BlobstoreFSRoot   string   // env BLOBSTORE_FS_ROOT, default "./var/blobstore"
 }
 
 type AnalyticsService struct {
@@ -79,23 +86,33 @@ type ExportService struct {
 func LoadSyncService() (*SyncService, error) {
 	s, errs := loadShared(":8080")
 	cfg := &SyncService{
-		Addr:             s.Addr,
-		DatabaseURL:      s.DatabaseURL,
-		AppleAudience:    getenv("APPLE_AUDIENCE", "com.snoreguard.app"),
-		AppleIssuer:      getenv("APPLE_ISSUER", "https://appleid.apple.com"),
-		JWTSigningKey:    s.JWTSigningKey,
-		JWTIssuer:        s.JWTIssuer,
-		JWTRefreshIssuer: getenv("JWT_REFRESH_ISSUER", "snoreguard-refresh"),
-		JWTTTL:           s.JWTTTL,
-		JWTRefreshTTL:    getDuration("JWT_REFRESH_TTL", 60*24*time.Hour),
-		LogLevel:         s.LogLevel,
-		RequestTimeout:   s.RequestTimeout,
+		Addr:              s.Addr,
+		DatabaseURL:       s.DatabaseURL,
+		AppleAudience:     getenv("APPLE_AUDIENCE", "com.snoreguard.app"),
+		AppleIssuer:       getenv("APPLE_ISSUER", "https://appleid.apple.com"),
+		JWTSigningKey:     s.JWTSigningKey,
+		JWTIssuer:         s.JWTIssuer,
+		JWTRefreshIssuer:  getenv("JWT_REFRESH_ISSUER", "snoreguard-refresh"),
+		JWTTTL:            s.JWTTTL,
+		JWTRefreshTTL:     getDuration("JWT_REFRESH_TTL", 60*24*time.Hour),
+		LogLevel:          s.LogLevel,
+		RequestTimeout:    s.RequestTimeout,
+		AudioMaxClipBytes: getInt64("AUDIO_MAX_CLIP_BYTES", 5*1024*1024),
+		AudioAllowedMIME:  getCSV("AUDIO_ALLOWED_MIME", []string{"audio/m4a", "audio/mp4", "audio/wav", "audio/aac"}),
+		BlobstoreBackend:  getenv("BLOBSTORE_BACKEND", "filesystem"),
+		BlobstoreFSRoot:   getenv("BLOBSTORE_FS_ROOT", "./var/blobstore"),
 	}
 	if cfg.AppleAudience == "" {
 		errs = append(errs, errors.New("APPLE_AUDIENCE is required"))
 	}
 	if cfg.JWTRefreshIssuer == cfg.JWTIssuer {
 		errs = append(errs, errors.New("JWT_REFRESH_ISSUER must differ from JWT_ISSUER"))
+	}
+	if cfg.AudioMaxClipBytes <= 0 {
+		errs = append(errs, errors.New("AUDIO_MAX_CLIP_BYTES must be > 0"))
+	}
+	if len(cfg.AudioAllowedMIME) == 0 {
+		errs = append(errs, errors.New("AUDIO_ALLOWED_MIME must list at least one MIME"))
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
@@ -156,6 +173,43 @@ func getInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// getInt64 mirrors getInt for int64-typed fields (e.g. byte caps that
+// can plausibly exceed math.MaxInt32).
+func getInt64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: invalid %s=%q, using default %d\n", key, v, fallback)
+		return fallback
+	}
+	return n
+}
+
+// getCSV reads a comma-separated env var into a trimmed []string,
+// skipping blank entries. Empty env returns the fallback verbatim
+// (so caller defaults survive a missing env var).
+func getCSV(key string, fallback []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.TrimSpace(p)
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return fallback
+	}
+	return out
 }
 
 func getDuration(key string, fallback time.Duration) time.Duration {
