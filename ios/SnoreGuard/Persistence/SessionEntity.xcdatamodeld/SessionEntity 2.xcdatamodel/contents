@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+    SessionEntity v2 — Phase E (cloud-sync) schema.
+
+    All additions are additive (new optional or default-valued
+    attributes / new entity / new relationships) so Core Data's
+    lightweight migration path handles the upgrade without an
+    explicit mapping model. PersistenceController already opts in
+    via shouldMigrateStoreAutomatically + shouldInferMappingModelAutomatically.
+
+    Field semantics mirror the backend wire format on
+    claude/backend-audio-cloud-sync (backend/internal/store/clips.go):
+      - client_session_id / client_clip_id / client_event_id are the
+        client-assigned dedup keys the backend upserts on.
+      - sync_status: "pending" | "uploading" | "synced" | "failed"
+      - remote_id: server-assigned UUID after a successful upload.
+      - sha256 + size_bytes are content-addressed; the first
+        successful upload wins, so a retried multipart with a
+        different body can't silently swap bytes.
+      - deleted_at on AudioClipEntity is a soft-delete tombstone for
+        the History UI; the local file is removed eagerly on delete,
+        so localFilePath == nil AND deletedAt != nil together mean
+        "user deleted this clip".
+
+    Backfill of clientSessionID / clientEventID for v1 rows happens
+    once at app launch via EventStore.migrateFromV1().
+-->
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="22222" systemVersion="23F79" minimumToolsVersion="Automatic" sourceLanguage="Swift" userDefinedModelVersionIdentifier="2">
+    <entity name="SessionEntity" representedClassName="SessionEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="startedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="endedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="clientSessionID" attributeType="String" defaultValueString=""/>
+        <attribute name="syncStatus" attributeType="String" defaultValueString="pending"/>
+        <attribute name="remoteID" optional="YES" attributeType="String"/>
+        <attribute name="appVersion" optional="YES" attributeType="String"/>
+        <attribute name="deviceName" optional="YES" attributeType="String"/>
+        <relationship name="events" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="EventEntity" inverseName="session" inverseEntity="EventEntity"/>
+        <relationship name="clips" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="AudioClipEntity" inverseName="session" inverseEntity="AudioClipEntity"/>
+    </entity>
+    <entity name="EventEntity" representedClassName="EventEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="startedAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="durationMS" attributeType="Integer 32" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="avgDB" attributeType="Float" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="syncedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="clientEventID" attributeType="String" defaultValueString=""/>
+        <attribute name="startMs" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="syncStatus" attributeType="String" defaultValueString="pending"/>
+        <attribute name="remoteID" optional="YES" attributeType="String"/>
+        <relationship name="session" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="SessionEntity" inverseName="events" inverseEntity="SessionEntity"/>
+        <relationship name="clip" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="AudioClipEntity" inverseName="event" inverseEntity="AudioClipEntity"/>
+    </entity>
+    <entity name="AudioClipEntity" representedClassName="AudioClipEntity" syncable="YES" codeGenerationType="class">
+        <attribute name="id" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="clientClipID" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="localFilePath" optional="YES" attributeType="String"/>
+        <attribute name="remoteID" optional="YES" attributeType="String"/>
+        <attribute name="contentType" attributeType="String" defaultValueString="audio/m4a"/>
+        <attribute name="sizeBytes" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
+        <attribute name="sha256" attributeType="String" defaultValueString=""/>
+        <attribute name="syncStatus" attributeType="String" defaultValueString="pending"/>
+        <attribute name="uploadedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="deletedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <relationship name="session" maxCount="1" deletionRule="Nullify" destinationEntity="SessionEntity" inverseName="clips" inverseEntity="SessionEntity"/>
+        <relationship name="event" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="EventEntity" inverseName="clip" inverseEntity="EventEntity"/>
+    </entity>
+</model>

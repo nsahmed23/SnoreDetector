@@ -67,6 +67,22 @@ final class PersistenceController: ObservableObject {
         }
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         container.viewContext.automaticallyMergesChangesFromParent = true
+
+        // Phase E v1 → v2 backfill. Detached so the launch path isn't
+        // blocked on a (typically empty) row scan; running off a
+        // background context inside EventStore.migrateFromV1.
+        // Idempotent — second-launch cost is one indexed predicate
+        // hit, no writes.
+        Task.detached { [weak self] in
+            guard let self = self else { return }
+            let store = await EventStore(self)
+            do {
+                try await store.migrateFromV1()
+            } catch {
+                let log = Logger(subsystem: "com.snoreguard.app", category: "Persistence")
+                log.error("migrateFromV1: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Background context for writes that shouldn't block the UI.
