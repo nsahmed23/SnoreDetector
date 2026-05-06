@@ -1,0 +1,1325 @@
+openapi: 3.1.0
+info:
+  title: SnoreGuard API
+  version: 1.0.0-draft
+  summary: Backend services for the SnoreGuard iOS app.
+  description: |
+    Three Go services exposed at separate ports in production but
+    documented as one logical API here. The iOS client talks to all
+    three; clients SHOULD treat any 5xx as transient and retry with
+    exponential backoff.
+
+    Source of truth for this spec is the Go handler tree on the
+    `claude/backend-audio-cloud-sync` branch:
+      - backend/internal/server/{auth,events,sessions,clips}.go
+      - backend/internal/analytics/handlers.go
+      - backend/internal/export/handlers.go
+
+    All bodies and responses are `application/json` unless otherwise
+    noted. The error envelope is `{"error": "<message>"}` for every
+    4xx and 5xx. Timestamps are RFC3339 (the Go encoder emits
+    RFC3339Nano with fractional seconds; both with and without
+    fractional are accepted on input).
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local sync-service
+  - url: http://localhost:8081
+    description: Local analytics-service
+  - url: http://localhost:8082
+    description: Local export-service
+  - url: https://api.snoreguard.app
+    description: Production (TBD; see DEPLOYMENT.md GCP topology)
+
+tags:
+  - name: health
+    description: Liveness + Postgres ping (one per service).
+  - name: auth
+    description: Sign in with Apple, refresh-token rotation, logout.
+  - name: events
+    description: Bulk snore-event upload and listing.
+  - name: sessions
+    description: Per-recording-run container objects.
+  - name: audio
+    description: Multipart audio-clip upload, list, download, delete.
+  - name: analytics
+    description: Per-user daily summaries and all-time totals.
+  - name: export
+    description: Streaming CSV/JSON portability dumps.
+
+security: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealthz
+      summary: Liveness + Postgres ping
+      description: |
+        Returns 200 when the service is up and Postgres responds to
+        a `SELECT 1` ping. Returns 503 with a `db_error` field when
+        the DB ping fails. Exposed by all three services.
+      security: []
+      responses:
+        "200":
+          description: Service healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthOK"
+        "503":
+          description: Postgres unreachable (degraded).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthDegraded"
+
+  /auth/apple:
+    post:
+      tags: [auth]
+      operationId: postAuthApple
+      summary: Exchange Apple identity token for session tokens
+      description: |
+        Verifies the Sign in with Apple `identity_token`, upserts
+        the user, and returns a fresh access + refresh-token pair.
+
+        Rate-limited: 10/min per IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthAppleRequest"
+      responses:
+        "200":
+          description: Tokens issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokensResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Identity token rejected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      operationId: postAuthRefresh
+      summary: Rotate a refresh token
+      description: |
+        Exchanges a valid refresh token for a new access + refresh
+        pair. The old refresh token is marked `replaced_by` and
+        rejected on subsequent calls. Replaying an already-rotated
+        refresh token revokes the entire family (theft response).
+
+        Rate-limited: 30/min per IP.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRefreshRequest"
+      responses:
+        "200":
+          description: Tokens rotated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthTokensResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          description: Refresh token invalid, revoked, or replayed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: postAuthLogout
+      summary: Revoke current access JTI + refresh family
+      description: |
+        Revokes the access token's JTI and (if the body carries a
+        refresh token) the entire refresh-token family. Body is
+        optional; clients without a refresh token can still log
+        out the current access token.
+
+        Rate-limited: 30/min per user-id.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthLogoutRequest"
+      responses:
+        "200":
+          description: Logged out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /events:
+    post:
+      tags: [events]
+      operationId: postEvents
+      summary: Bulk-upload snore events (idempotent)
+      description: |
+        Bulk-uploads up to 500 events. Idempotent on
+        `client_event_id`. **All-or-nothing**: if any single event
+        in the batch fails validation, the entire request returns
+        400 with no inserts. The response's `inserted` may be
+        less than `received` when some `client_event_id`s already
+        existed.
+
+        Rate-limited: 200/min per user-id.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostEventsRequest"
+      responses:
+        "200":
+          description: Inserted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostEventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    get:
+      tags: [events]
+      operationId: listEvents
+      summary: List own snore events (paginated)
+      description: |
+        Returns events ordered ascending by `(received_at, id)`.
+        Pagination uses an opaque base64 compound cursor. The
+        legacy `since=<RFC3339>` query param is preserved for
+        backward compatibility (treated as `cursor=(since, nil)`).
+
+        Rate-limited: 200/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - name: since
+          in: query
+          required: false
+          description: |
+            Legacy: RFC3339 lower bound. Ignored when `cursor` is
+            also supplied. New clients SHOULD use `cursor`.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Events page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListEventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /sessions:
+    post:
+      tags: [sessions]
+      operationId: postSession
+      summary: Open or refresh a recording session (idempotent)
+      description: |
+        Records (or refreshes) a recording session — the per-night
+        container that events and audio clips attach to. Idempotent
+        on `client_session_id`; re-posting the same id returns the
+        same `session_id` and updates `ended_at`/`device_name`/
+        `app_version` only when the incoming value is non-null
+        (COALESCE semantics).
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostSessionRequest"
+      responses:
+        "200":
+          description: Session recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostSessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    get:
+      tags: [sessions]
+      operationId: listSessions
+      summary: List own recording sessions (newest-first)
+      description: |
+        Returns sessions ordered descending by `(started_at, id)`.
+        Cursor is opaque base64.
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Sessions page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSessionsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /audio/clips:
+    post:
+      tags: [audio]
+      operationId: postAudioClip
+      summary: Upload one audio clip (multipart, idempotent)
+      description: |
+        Uploads one raw audio clip. The body is `multipart/form-data`
+        with two parts:
+
+        - `metadata` — application/json, conforming to
+          `ClipMetadataRequest`.
+        - `file` — binary audio body.
+
+        Server enforces:
+        - sha256 of the `file` bytes equals `metadata.sha256`.
+        - declared part Content-Type AND sniffed content-type are
+          both on the MIME allowlist (`audio/m4a`, `audio/mp4`,
+          `audio/wav`, `audio/aac` by default; configurable via
+          `AUDIO_ALLOWED_MIME`).
+        - body size <= `AUDIO_MAX_CLIP_BYTES` (default 5 MiB).
+
+        Idempotent on `client_clip_id`: re-uploading the same id
+        returns the existing row with `created: false` and does NOT
+        overwrite the stored object.
+
+        Rate-limited: 30/min per user-id.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [metadata, file]
+              properties:
+                metadata:
+                  $ref: "#/components/schemas/ClipMetadataRequest"
+                file:
+                  type: string
+                  format: binary
+                  description: Raw audio bytes (m4a/mp4/wav/aac).
+            encoding:
+              metadata:
+                contentType: application/json
+              file:
+                contentType: audio/m4a, audio/mp4, audio/wav, audio/aac
+      responses:
+        "200":
+          description: Clip recorded (created or idempotent retry).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostClipResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: Audio body exceeds the per-clip cap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: |
+            Declared or sniffed content-type not on the allowlist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    get:
+      tags: [audio]
+      operationId: listAudioClips
+      summary: List own audio clips (newest-first)
+      description: |
+        Returns clip metadata ordered descending by
+        `(started_at, id)`. The body bytes are fetched separately
+        via `GET /audio/clips/{id}/download`.
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CursorParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Clips page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListClipsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /audio/clips/{id}:
+    delete:
+      tags: [audio]
+      operationId: deleteAudioClip
+      summary: Soft-delete a clip
+      description: |
+        Soft-deletes the clip metadata row (sets `deleted_at`) and
+        best-effort deletes the stored object. The user's intent is
+        durable on the row even if the object delete fails;
+        orphaned objects are reaped by future cleanup.
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ClipIDParam"
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteClipResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /audio/clips/{id}/download:
+    get:
+      tags: [audio]
+      operationId: downloadAudioClip
+      summary: Stream the raw audio bytes for one clip
+      description: |
+        Streams the raw audio bytes back to the caller. Always
+        streams `audio/*` directly — there are NO signed URLs in
+        the v1 API.
+
+        The response Content-Type matches the stored content-type
+        (one of the MIME allowlist entries). Content-Disposition
+        is set to `attachment; filename="snoreguard-clip-<id>.bin"`
+        so curl-style downloads are well-named.
+
+        Rate-limited: 10/hour per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ClipIDParam"
+      responses:
+        "200":
+          description: Audio bytes streamed.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                examples: ["audio/m4a"]
+            Content-Length:
+              schema:
+                type: integer
+                format: int64
+            Content-Disposition:
+              schema:
+                type: string
+                examples: ['attachment; filename="snoreguard-clip-<uuid>.bin"']
+          content:
+            audio/m4a:
+              schema:
+                type: string
+                format: binary
+            audio/mp4:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Clip not found, soft-deleted, or body missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /analytics/summary:
+    get:
+      tags: [analytics]
+      operationId: getAnalyticsSummary
+      summary: Per-day rollup of own events
+      description: |
+        Returns one row per day inside `[start, end]` bucketed in
+        the requested timezone. `tz` defaults to UTC; `start` and
+        `end` are RFC3339; range capped at 366 days.
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: start
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: tz
+          in: query
+          required: false
+          description: IANA timezone (default UTC).
+          schema:
+            type: string
+            examples: ["America/Los_Angeles"]
+      responses:
+        "200":
+          description: Daily summary rows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailySummaryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /analytics/totals:
+    get:
+      tags: [analytics]
+      operationId: getAnalyticsTotals
+      summary: All-time-or-since totals + first/last event timestamps
+      description: |
+        Returns aggregates over all of the user's events, optionally
+        bounded below by `since`.
+
+        Rate-limited: 60/min per user-id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Totals.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TotalsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /export/events.csv:
+    get:
+      tags: [export]
+      operationId: exportEventsCSV
+      summary: Streaming CSV export of own events (+optional sessions/clips)
+      description: |
+        Streams the user's snore events as CSV. Always streams in
+        500-row pages so even multi-month exports stay flat in
+        memory.
+
+        `include=sessions,clips` appends additional sections after
+        the events section. Each new section is preceded by a
+        `# section: <name>` comment line and its own header row.
+
+        **Streaming partial-response disclosure**: on a mid-stream
+        store error the response is truncated with HTTP 200 already
+        in flight; clients should re-reconcile by retry or row-count
+        comparison.
+
+        Rate-limited: 10/hour per user-id. Per-user 24h export
+        budget enforced separately (returns 429 + Retry-After when
+        exhausted).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ExportSinceParam"
+        - $ref: "#/components/parameters/ExportMaxParam"
+        - $ref: "#/components/parameters/ExportIncludeParam"
+      responses:
+        "200":
+          description: CSV stream.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                examples: ["text/csv; charset=utf-8"]
+            Content-Disposition:
+              schema:
+                type: string
+                examples: ['attachment; filename="snoreguard-events.csv"']
+          content:
+            text/csv:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /export/events.json:
+    get:
+      tags: [export]
+      operationId: exportEventsJSON
+      summary: Streaming JSON export of own events (+optional sessions/clips)
+      description: |
+        Streams the user's snore events as JSON. Default shape is
+        `{"events":[…],"count":N}`. With `include=sessions,clips`
+        the shape becomes
+        `{"events":[…],"sessions":[…],"clips":[…],"count":{...}}`.
+
+        **Streaming partial-response disclosure**: on a mid-stream
+        store error the response is truncated, missing the closing
+        `]}` and the `count` field. Clients SHOULD treat malformed
+        trailing JSON as a partial export and retry later.
+
+        Rate-limited: 10/hour per user-id. Per-user 24h export
+        budget enforced separately (returns 429 + Retry-After when
+        exhausted).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ExportSinceParam"
+        - $ref: "#/components/parameters/ExportMaxParam"
+        - $ref: "#/components/parameters/ExportIncludeParam"
+      responses:
+        "200":
+          description: JSON stream.
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                examples: ["application/json; charset=utf-8"]
+            Content-Disposition:
+              schema:
+                type: string
+                examples: ['attachment; filename="snoreguard-events.json"']
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ExportJSONBare"
+                  - $ref: "#/components/schemas/ExportJSONExtended"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HS256 access token issued by `/auth/apple` or `/auth/refresh`.
+        Lifetime ~1h. Send as `Authorization: Bearer <access_token>`.
+
+  parameters:
+    CursorParam:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque base64 compound cursor. Internally encodes
+        `(received_at, id)` for ascending lists or
+        `(started_at, id)` for descending lists, but clients MUST
+        treat it as opaque and pass it back unchanged.
+      schema:
+        type: string
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Page size (1..1000). Default 100-200 per route.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+    ClipIDParam:
+      name: id
+      in: path
+      required: true
+      description: Audio clip UUID (server-assigned, returned by POST /audio/clips).
+      schema:
+        type: string
+        format: uuid
+    ExportSinceParam:
+      name: since
+      in: query
+      required: false
+      description: RFC3339 lower bound on `received_at`.
+      schema:
+        type: string
+        format: date-time
+    ExportMaxParam:
+      name: max
+      in: query
+      required: false
+      description: |
+        Maximum total rows (events section) emitted. Range
+        `[0, 1000000]`; 0 means no cap.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 1000000
+    ExportIncludeParam:
+      name: include
+      in: query
+      required: false
+      description: |
+        Comma-separated subset of `sessions,clips`. Empty (omitted)
+        preserves the original wire shape (events only). Any other
+        value returns 400.
+      schema:
+        type: string
+        examples: ["sessions,clips"]
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found or soft-deleted.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TooManyRequests:
+      description: |
+        Rate limit or per-user export budget exceeded.
+      headers:
+        Retry-After:
+          description: |
+            Seconds the client should wait before retrying.
+            Always present on 429.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServerError:
+      description: Internal error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    HealthOK:
+      type: object
+      required: [status, time]
+      properties:
+        status:
+          type: string
+          examples: ["ok"]
+        service:
+          type: string
+          description: Set on analytics-service and export-service responses.
+          examples: ["analytics", "export"]
+        time:
+          type: string
+          format: date-time
+
+    HealthDegraded:
+      type: object
+      required: [status, time, db_error]
+      properties:
+        status:
+          type: string
+          examples: ["degraded"]
+        service:
+          type: string
+        time:
+          type: string
+          format: date-time
+        db_error:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        retry_after_seconds:
+          type: integer
+          minimum: 1
+          description: |
+            Present on the export-service 429 (per-user 24h
+            budget). Mirrors the `Retry-After` header.
+
+    LogoutResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          examples: ["logged_out"]
+
+    DeleteClipResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          examples: ["deleted"]
+
+    AuthAppleRequest:
+      type: object
+      required: [identity_token]
+      properties:
+        identity_token:
+          type: string
+          description: Apple-signed identity JWT from ASAuthorizationAppleIDCredential.
+
+    AuthRefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    AuthLogoutRequest:
+      type: object
+      properties:
+        refresh_token:
+          type: string
+          description: |
+            Optional. When present, the entire refresh-token family
+            is revoked in addition to the current access JTI.
+
+    AuthTokensResponse:
+      type: object
+      required:
+        - user_id
+        - access_token
+        - access_token_expires_at
+        - refresh_token
+        - refresh_token_expires_at
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        access_token:
+          type: string
+          description: HS256 JWT, ~1h lifetime.
+        access_token_expires_at:
+          type: string
+          format: date-time
+        refresh_token:
+          type: string
+          description: HS256 JWT, ~60d lifetime, rotated on every use.
+        refresh_token_expires_at:
+          type: string
+          format: date-time
+
+    EventDTO:
+      type: object
+      required: [client_event_id, started_at, duration_ms, avg_db]
+      properties:
+        client_event_id:
+          type: string
+          maxLength: 128
+          description: Client-assigned dedup key.
+        started_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 86400000
+        avg_db:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 200
+          description: Uncalibrated average dB across the event window.
+        session_id:
+          type: string
+          format: uuid
+          description: Optional per-recording session UUID.
+
+    PostEventsRequest:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/EventDTO"
+
+    PostEventsResponse:
+      type: object
+      required: [inserted, received]
+      properties:
+        inserted:
+          type: integer
+          description: Newly-inserted rows; excludes idempotent duplicates.
+        received:
+          type: integer
+          description: Length of the input batch.
+
+    EventListItem:
+      allOf:
+        - $ref: "#/components/schemas/EventDTO"
+
+    ListEventsResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventListItem"
+        next_cursor:
+          type: string
+          description: |
+            Opaque base64 cursor. Omitted when the caller has
+            reached the tail.
+
+    PostSessionRequest:
+      type: object
+      required: [client_session_id, started_at]
+      properties:
+        client_session_id:
+          type: string
+          maxLength: 128
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+          description: Must be >= started_at when present.
+        device_name:
+          type: string
+          maxLength: 256
+        app_version:
+          type: string
+          maxLength: 64
+
+    PostSessionResponse:
+      type: object
+      required: [session_id, created]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        created:
+          type: boolean
+          description: |
+            False on idempotent retry. Not an error — the row
+            already existed and was COALESCE-updated.
+
+    SessionDTO:
+      type: object
+      required: [session_id, client_session_id, started_at]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        client_session_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        device_name:
+          type: string
+        app_version:
+          type: string
+
+    ListSessionsResponse:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionDTO"
+        next_cursor:
+          type: string
+          description: Opaque base64 cursor.
+
+    ClipMetadataRequest:
+      type: object
+      required: [client_clip_id, started_at, duration_ms, sha256]
+      properties:
+        client_clip_id:
+          type: string
+          maxLength: 128
+          description: Client-assigned dedup key.
+        client_event_id:
+          type: string
+          maxLength: 128
+          description: Optional cross-link to a snore_event row.
+        session_id:
+          type: string
+          format: uuid
+          description: Optional per-recording session UUID.
+        started_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 86400000
+        avg_db:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 200
+        sha256:
+          type: string
+          minLength: 64
+          maxLength: 64
+          pattern: "^[a-fA-F0-9]{64}$"
+          description: |
+            Lowercase or uppercase hex sha256 of the `file` body.
+            Server rejects on mismatch.
+
+    PostClipResponse:
+      type: object
+      required: [clip_id, created, object_key, uploaded_at]
+      properties:
+        clip_id:
+          type: string
+          format: uuid
+        created:
+          type: boolean
+          description: False on idempotent retry.
+        object_key:
+          type: string
+          description: |
+            Server-controlled blob key (`clips/<user_id>/<uuid>`).
+            User-supplied keys are not honored.
+        uploaded_at:
+          type: string
+          format: date-time
+
+    ClipDTO:
+      type: object
+      required:
+        - clip_id
+        - client_clip_id
+        - started_at
+        - duration_ms
+        - content_type
+        - size_bytes
+        - sha256
+        - uploaded_at
+      properties:
+        clip_id:
+          type: string
+          format: uuid
+        session_id:
+          type: string
+          format: uuid
+        client_clip_id:
+          type: string
+        client_event_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          format: int32
+        avg_db:
+          type: number
+          format: float
+        content_type:
+          type: string
+          examples: ["audio/m4a"]
+        size_bytes:
+          type: integer
+          format: int64
+        sha256:
+          type: string
+        uploaded_at:
+          type: string
+          format: date-time
+
+    ListClipsResponse:
+      type: object
+      required: [clips]
+      properties:
+        clips:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClipDTO"
+        next_cursor:
+          type: string
+          description: Opaque base64 cursor.
+
+    DailyRow:
+      type: object
+      required:
+        - day
+        - event_count
+        - total_duration_ms
+        - avg_db
+        - longest_ms
+      properties:
+        day:
+          type: string
+          description: YYYY-MM-DD in the requested timezone.
+          examples: ["2026-05-05"]
+        event_count:
+          type: integer
+          format: int64
+        total_duration_ms:
+          type: integer
+          format: int64
+        avg_db:
+          type: number
+          format: double
+        longest_ms:
+          type: integer
+          format: int32
+
+    DailySummaryResponse:
+      type: object
+      required: [tz, days]
+      properties:
+        tz:
+          type: string
+          examples: ["UTC", "America/Los_Angeles"]
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/DailyRow"
+
+    TotalsResponse:
+      type: object
+      required:
+        - event_count
+        - total_duration_ms
+        - avg_db
+        - longest_ms
+      properties:
+        event_count:
+          type: integer
+          format: int64
+        total_duration_ms:
+          type: integer
+          format: int64
+        avg_db:
+          type: number
+          format: double
+        longest_ms:
+          type: integer
+          format: int32
+        first_event_at:
+          type: string
+          format: date-time
+        last_event_at:
+          type: string
+          format: date-time
+
+    ExportEvent:
+      type: object
+      required:
+        - client_event_id
+        - started_at
+        - duration_ms
+        - avg_db
+        - received_at
+      properties:
+        client_event_id:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+          format: int32
+        avg_db:
+          type: number
+          format: float
+        session_id:
+          type: string
+        received_at:
+          type: string
+          format: date-time
+
+    ExportJSONBare:
+      type: object
+      required: [events, count]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportEvent"
+        count:
+          type: integer
+          description: Number of events in this export.
+
+    ExportJSONExtended:
+      type: object
+      required: [events, count]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExportEvent"
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/SessionDTO"
+        clips:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClipDTO"
+        count:
+          type: object
+          description: Per-section counts.
+          required: [events]
+          properties:
+            events:
+              type: integer
+            sessions:
+              type: integer
+            clips:
+              type: integer
