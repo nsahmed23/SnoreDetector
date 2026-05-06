@@ -4,6 +4,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -43,6 +44,8 @@ func freshDB(t *testing.T) (*store.Store, func()) {
 	}
 	// Tear down any previous run, then migrate fresh.
 	_, _ = migConn.Exec(ctx, `
+		DROP TABLE IF EXISTS revoked_jti;
+		DROP TABLE IF EXISTS refresh_tokens;
 		DROP TABLE IF EXISTS snore_events;
 		DROP TABLE IF EXISTS users;
 		DROP TABLE IF EXISTS schema_migrations;
@@ -132,7 +135,7 @@ func TestListEvents_FilterAndPaginate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.ListEvents(ctx, mine.ID, time.Time{}, 100)
+	got, err := s.ListEvents(ctx, mine.ID, store.ZeroCursor(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +146,66 @@ func TestListEvents_FilterAndPaginate(t *testing.T) {
 		if e.UserID != mine.ID {
 			t.Errorf("returned event for wrong user: %s", e.UserID)
 		}
+	}
+}
+
+// TestListEvents_PaginatesAcrossSharedReceivedAt is the regression
+// test for the data-loss bug where the old single-timestamp cursor
+// silently dropped rows on page boundaries that fell on a shared
+// received_at = NOW() value (which happens whenever a client uploads
+// a batch in a single transaction).
+func TestListEvents_PaginatesAcrossSharedReceivedAt(t *testing.T) {
+	s, done := freshDB(t)
+	defer done()
+	ctx := context.Background()
+
+	user, err := s.UpsertUser(ctx, "apple-sub-pagination", "p@example.com", false)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// Insert 250 events through the store API. The store wraps every
+	// batch in a single transaction with NOW(), so all 250 rows share
+	// the same received_at — exactly the condition the bug needs.
+	const total = 250
+	batch := make([]store.SnoreEvent, total)
+	for i := range batch {
+		batch[i] = store.SnoreEvent{
+			ClientEventID: fmt.Sprintf("ev-%03d", i),
+			StartedAt:     time.Now().UTC(),
+			DurationMS:    1000,
+			AvgDB:         60.0,
+		}
+	}
+	n, err := s.InsertEvents(ctx, user.ID, batch)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if n != total {
+		t.Fatalf("inserted %d, want %d", n, total)
+	}
+
+	const pageSize = 100
+	seen := map[string]bool{}
+	cursor := store.ZeroCursor()
+	for page := 0; page < (total/pageSize)+5; page++ {
+		rows, err := s.ListEvents(ctx, user.ID, cursor, pageSize)
+		if err != nil {
+			t.Fatalf("page %d: %v", page, err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for _, e := range rows {
+			if seen[e.ClientEventID] {
+				t.Fatalf("duplicate %s on page %d", e.ClientEventID, page)
+			}
+			seen[e.ClientEventID] = true
+			cursor = store.Cursor{ReceivedAt: e.ReceivedAt, ID: e.ID}
+		}
+	}
+	if len(seen) != total {
+		t.Errorf("paginated %d rows, want %d (data loss in cursor pagination)", len(seen), total)
 	}
 }
 

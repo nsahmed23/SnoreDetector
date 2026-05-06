@@ -23,8 +23,16 @@ import (
 type Store interface {
 	UpsertUser(ctx context.Context, appleSubject, email string, isPrivateEmail bool) (*store.User, error)
 	InsertEvents(ctx context.Context, userID uuid.UUID, evs []store.SnoreEvent) (int, error)
-	ListEvents(ctx context.Context, userID uuid.UUID, since time.Time, limit int) ([]store.SnoreEvent, error)
+	ListEvents(ctx context.Context, userID uuid.UUID, cursor store.Cursor, limit int) ([]store.SnoreEvent, error)
 	Ping(ctx context.Context) error
+
+	// Refresh-token + revocation surface.
+	RecordRefreshToken(ctx context.Context, tokenID, userID, familyID uuid.UUID, expiresAt time.Time) error
+	GetRefreshToken(ctx context.Context, tokenID uuid.UUID) (*store.RefreshToken, error)
+	ReplaceRefreshToken(ctx context.Context, oldID, newID, userID, familyID uuid.UUID, expiresAt time.Time) error
+	RevokeRefreshFamily(ctx context.Context, userID, familyID uuid.UUID) error
+	RecordRevokedJTI(ctx context.Context, jti string, userID uuid.UUID) error
+	IsJTIRevoked(ctx context.Context, jti string) (bool, error)
 }
 
 type Deps struct {
@@ -57,9 +65,11 @@ func New(d Deps) http.Handler {
 
 	authH := &authHandler{deps: d}
 	r.Post("/auth/apple", authH.handle)
+	r.Post("/auth/refresh", authH.refresh)
 
 	r.Group(func(r chi.Router) {
-		r.Use(AuthMiddleware(d.JWT))
+		r.Use(AuthMiddleware(d.JWT, d.Store))
+		r.Post("/auth/logout", authH.logout)
 		evH := &eventsHandler{deps: d}
 		r.Post("/events", evH.create)
 		r.Get("/events", evH.list)

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -26,18 +27,26 @@ import (
 
 // fakeStore is an in-memory Store for handler tests.
 type fakeStore struct {
-	mu          sync.Mutex
-	users       map[string]*store.User // keyed by apple_subject
-	events      []store.SnoreEvent
-	upsertErr   error
-	insertErr   error
-	listErr     error
-	pingErr     error
-	upsertCalls int
+	mu             sync.Mutex
+	users          map[string]*store.User // keyed by apple_subject
+	events         []store.SnoreEvent
+	refreshTokens  map[uuid.UUID]*store.RefreshToken
+	revokedJTIs    map[string]uuid.UUID
+	upsertErr      error
+	insertErr      error
+	listErr        error
+	pingErr        error
+	upsertCalls    int
+	now            func() time.Time
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{users: map[string]*store.User{}}
+	return &fakeStore{
+		users:         map[string]*store.User{},
+		refreshTokens: map[uuid.UUID]*store.RefreshToken{},
+		revokedJTIs:   map[string]uuid.UUID{},
+		now:           func() time.Time { return time.Now().UTC() },
+	}
 }
 
 func (f *fakeStore) UpsertUser(_ context.Context, sub, email string, isPriv bool) (*store.User, error) {
@@ -94,15 +103,30 @@ func (f *fakeStore) InsertEvents(_ context.Context, uid uuid.UUID, evs []store.S
 	return inserted, nil
 }
 
-func (f *fakeStore) ListEvents(_ context.Context, uid uuid.UUID, since time.Time, limit int) ([]store.SnoreEvent, error) {
+func (f *fakeStore) ListEvents(_ context.Context, uid uuid.UUID, cursor store.Cursor, limit int) ([]store.SnoreEvent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	out := []store.SnoreEvent{}
+	// Sort by (received_at, id) ascending so the fake matches the
+	// real store's compound-cursor ordering.
+	mine := []store.SnoreEvent{}
 	for _, e := range f.events {
-		if e.UserID == uid && e.ReceivedAt.After(since) {
+		if e.UserID != uid {
+			continue
+		}
+		mine = append(mine, e)
+	}
+	sort.Slice(mine, func(i, j int) bool {
+		if mine[i].ReceivedAt.Equal(mine[j].ReceivedAt) {
+			return mine[i].ID.String() < mine[j].ID.String()
+		}
+		return mine[i].ReceivedAt.Before(mine[j].ReceivedAt)
+	})
+	out := []store.SnoreEvent{}
+	for _, e := range mine {
+		if rowGreater(e.ReceivedAt, e.ID, cursor.ReceivedAt, cursor.ID) {
 			out = append(out, e)
 			if len(out) >= limit {
 				break
@@ -112,7 +136,100 @@ func (f *fakeStore) ListEvents(_ context.Context, uid uuid.UUID, since time.Time
 	return out, nil
 }
 
+// rowGreater compares (a_ts, a_id) > (b_ts, b_id) lexicographically.
+func rowGreater(at time.Time, aid uuid.UUID, bt time.Time, bid uuid.UUID) bool {
+	if at.After(bt) {
+		return true
+	}
+	if at.Before(bt) {
+		return false
+	}
+	return aid.String() > bid.String()
+}
+
 func (f *fakeStore) Ping(_ context.Context) error { return f.pingErr }
+
+func (f *fakeStore) RecordRefreshToken(_ context.Context, tokenID, userID, familyID uuid.UUID, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshTokens[tokenID] = &store.RefreshToken{
+		TokenID:   tokenID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		IssuedAt:  f.now(),
+		ExpiresAt: expiresAt,
+	}
+	return nil
+}
+
+func (f *fakeStore) GetRefreshToken(_ context.Context, tokenID uuid.UUID) (*store.RefreshToken, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rt, ok := f.refreshTokens[tokenID]
+	if !ok {
+		return nil, store.ErrRefreshNotFound
+	}
+	// Return a copy so callers can't mutate the fake's state.
+	cp := *rt
+	if rt.RevokedAt != nil {
+		t := *rt.RevokedAt
+		cp.RevokedAt = &t
+	}
+	if rt.ReplacedBy != nil {
+		id := *rt.ReplacedBy
+		cp.ReplacedBy = &id
+	}
+	return &cp, nil
+}
+
+func (f *fakeStore) ReplaceRefreshToken(_ context.Context, oldID, newID, userID, familyID uuid.UUID, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	old, ok := f.refreshTokens[oldID]
+	if !ok {
+		return store.ErrRefreshNotFound
+	}
+	if old.ReplacedBy != nil || old.RevokedAt != nil {
+		return store.ErrAlreadyRotated
+	}
+	f.refreshTokens[newID] = &store.RefreshToken{
+		TokenID:   newID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		IssuedAt:  f.now(),
+		ExpiresAt: expiresAt,
+	}
+	id := newID
+	old.ReplacedBy = &id
+	return nil
+}
+
+func (f *fakeStore) RevokeRefreshFamily(_ context.Context, userID, familyID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.now()
+	for _, rt := range f.refreshTokens {
+		if rt.UserID == userID && rt.FamilyID == familyID && rt.RevokedAt == nil {
+			t := now
+			rt.RevokedAt = &t
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) RecordRevokedJTI(_ context.Context, jti string, userID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokedJTIs[jti] = userID
+	return nil
+}
+
+func (f *fakeStore) IsJTIRevoked(_ context.Context, jti string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.revokedJTIs[jti]
+	return ok, nil
+}
 
 // helpers for building a fully-wired server
 type harness struct {
@@ -136,7 +253,11 @@ func newHarness(t *testing.T) *harness {
 		func(_ *jwt.Token) (any, error) { return &priv.PublicKey, nil },
 	)
 	v.SetClock(func() time.Time { return time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC) })
-	iss, err := authjwt.New([]byte("test-signing-key-must-be-at-least-32-bytes-long!"), "test-iss", time.Hour)
+	iss, err := authjwt.NewWithRefresh(
+		[]byte("test-signing-key-must-be-at-least-32-bytes-long!"),
+		"test-iss", "test-refresh-iss",
+		time.Hour, 24*time.Hour,
+	)
 	if err != nil {
 		t.Fatalf("jwt.New: %v", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,6 +58,9 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// All-or-nothing: any malformed event rejects the whole batch.
+	// This keeps import semantics atomic — clients never have to
+	// reason about partial success.
 	rows := make([]store.SnoreEvent, 0, len(req.Events))
 	for i, e := range req.Events {
 		if err := validateEvent(e); err != nil {
@@ -89,9 +93,9 @@ func (h *eventsHandler) create(w http.ResponseWriter, r *http.Request) {
 
 type listEventsResponse struct {
 	Events []eventDTO `json:"events"`
-	// NextCursor is the `received_at` value of the last returned
-	// event in RFC3339Nano. The client passes it back as ?since= for
-	// the next page.
+	// NextCursor is an opaque base64 cursor pointing at the last row
+	// returned. Pass it back as `?cursor=` for the next page. Omitted
+	// when there are no more rows to return.
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
@@ -101,13 +105,16 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	since, err := parseSince(r.URL.Query().Get("since"))
+
+	q := r.URL.Query()
+	cursor, err := resolveCursor(q.Get("cursor"), q.Get("since"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid 'since' parameter (want RFC3339)")
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	limit := 200
-	if l := r.URL.Query().Get("limit"); l != "" {
+	if l := q.Get("limit"); l != "" {
 		n, err := strconv.Atoi(l)
 		if err != nil || n <= 0 || n > 1000 {
 			writeError(w, http.StatusBadRequest, "invalid 'limit' (1..1000)")
@@ -116,7 +123,7 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
-	rows, err := h.deps.Store.ListEvents(r.Context(), uid, since, limit)
+	rows, err := h.deps.Store.ListEvents(r.Context(), uid, cursor, limit)
 	if err != nil {
 		h.deps.Logger.Error("list events", "err", err.Error())
 		writeError(w, http.StatusInternalServerError, "failed to list events")
@@ -124,7 +131,6 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]eventDTO, 0, len(rows))
-	var lastReceived time.Time
 	for _, e := range rows {
 		out = append(out, eventDTO{
 			ClientEventID: e.ClientEventID,
@@ -133,13 +139,36 @@ func (h *eventsHandler) list(w http.ResponseWriter, r *http.Request) {
 			AvgDB:         e.AvgDB,
 			SessionID:     e.SessionID,
 		})
-		lastReceived = e.ReceivedAt
 	}
 	resp := listEventsResponse{Events: out}
-	if !lastReceived.IsZero() {
-		resp.NextCursor = lastReceived.UTC().Format(time.RFC3339Nano)
+	// Only emit a next_cursor when this page was full — otherwise the
+	// caller has reached the end and shouldn't paginate further.
+	if len(rows) == limit && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		resp.NextCursor = encodeCursor(store.Cursor{ReceivedAt: last.ReceivedAt, ID: last.ID})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// resolveCursor picks between the opaque `cursor` param and the legacy
+// `since` param. `cursor` wins when both are supplied. Empty inputs
+// yield the zero cursor (start from the beginning).
+func resolveCursor(cursorParam, sinceParam string) (store.Cursor, error) {
+	if cursorParam != "" {
+		c, err := decodeCursor(cursorParam)
+		if err != nil {
+			return store.Cursor{}, errors.New("invalid 'cursor' parameter")
+		}
+		return c, nil
+	}
+	if sinceParam != "" {
+		t, err := time.Parse(time.RFC3339, sinceParam)
+		if err != nil {
+			return store.Cursor{}, errors.New("invalid 'since' parameter (want RFC3339)")
+		}
+		return store.Cursor{ReceivedAt: t.UTC()}, nil
+	}
+	return store.ZeroCursor(), nil
 }
 
 func validateEvent(e eventDTO) error {
@@ -158,13 +187,12 @@ func validateEvent(e eventDTO) error {
 	if e.DurationMS > int32(24*time.Hour/time.Millisecond) {
 		return errors.New("duration_ms unreasonably large")
 	}
+	avg := float64(e.AvgDB)
+	if math.IsNaN(avg) || math.IsInf(avg, 0) {
+		return errors.New("avg_db must be finite")
+	}
+	if avg < 0 || avg > 200 {
+		return errors.New("avg_db out of range [0, 200]")
+	}
 	return nil
 }
-
-func parseSince(s string) (time.Time, error) {
-	if s == "" {
-		return time.Time{}, nil
-	}
-	return time.Parse(time.RFC3339, s)
-}
-

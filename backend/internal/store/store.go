@@ -15,6 +15,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ErrAlreadyRotated indicates a refresh-token row's `replaced_by` is
+// already set — i.e. the caller is replaying a refresh token that was
+// previously exchanged for a new one. Treated as theft by the server
+// layer (entire family revoked).
+var ErrAlreadyRotated = errors.New("store: refresh token already rotated")
+
+// ErrRefreshNotFound indicates the requested refresh-token row does
+// not exist (or has been deleted).
+var ErrRefreshNotFound = errors.New("store: refresh token not found")
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -113,13 +123,30 @@ ON CONFLICT (user_id, client_event_id) DO NOTHING;
 	return inserted, nil
 }
 
-// ListEvents returns events for a user, optionally filtered by
-// `received_at > since`, capped at `limit`. Ordered by received_at
-// ascending so cursor-based pagination is straightforward.
+// Cursor identifies a position in the (received_at, id)-ordered event
+// stream. The zero value (received_at = epoch, id = uuid.Nil) selects
+// every row, since the row tuple comparison
+//
+//	(received_at, id) > ('epoch'::timestamptz, '00000000-0000-0000-0000-000000000000')
+//
+// is true for any real row.
+type Cursor struct {
+	ReceivedAt time.Time
+	ID         uuid.UUID
+}
+
+// ZeroCursor returns the cursor that selects everything (the first page).
+func ZeroCursor() Cursor { return Cursor{} }
+
+// ListEvents returns events for a user with received_at strictly
+// greater than the cursor (compound key (received_at, id)). Capped at
+// `limit`. Ordered by received_at, id ascending so that
+// cursor-based pagination is stable when many events share the same
+// received_at (e.g. a single batched insert that uses NOW() once).
 func (s *Store) ListEvents(
 	ctx context.Context,
 	userID uuid.UUID,
-	since time.Time,
+	cursor Cursor,
 	limit int,
 ) ([]SnoreEvent, error) {
 	if limit <= 0 || limit > 1000 {
@@ -129,11 +156,11 @@ func (s *Store) ListEvents(
 SELECT id, user_id, client_event_id, started_at, duration_ms, avg_db,
        COALESCE(session_id, ''), received_at
 FROM snore_events
-WHERE user_id = $1 AND received_at > $2
-ORDER BY received_at ASC
-LIMIT $3;
+WHERE user_id = $1 AND (received_at, id) > ($2, $3)
+ORDER BY received_at ASC, id ASC
+LIMIT $4;
 `
-	rows, err := s.pool.Query(ctx, q, userID, since, limit)
+	rows, err := s.pool.Query(ctx, q, userID, cursor.ReceivedAt, cursor.ID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: list events: %w", err)
 	}
@@ -151,6 +178,151 @@ LIMIT $3;
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// RefreshToken mirrors the `refresh_tokens` row.
+type RefreshToken struct {
+	TokenID    uuid.UUID
+	UserID     uuid.UUID
+	FamilyID   uuid.UUID
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	ReplacedBy *uuid.UUID
+}
+
+// RecordRefreshToken inserts a freshly issued refresh-token row.
+func (s *Store) RecordRefreshToken(
+	ctx context.Context,
+	tokenID, userID, familyID uuid.UUID,
+	expiresAt time.Time,
+) error {
+	const q = `
+INSERT INTO refresh_tokens (token_id, user_id, family_id, expires_at)
+VALUES ($1, $2, $3, $4);
+`
+	if _, err := s.pool.Exec(ctx, q, tokenID, userID, familyID, expiresAt); err != nil {
+		return fmt.Errorf("store: record refresh token: %w", err)
+	}
+	return nil
+}
+
+// GetRefreshToken loads a refresh-token row by its token_id.
+func (s *Store) GetRefreshToken(ctx context.Context, tokenID uuid.UUID) (*RefreshToken, error) {
+	const q = `
+SELECT token_id, user_id, family_id, issued_at, expires_at, revoked_at, replaced_by
+FROM refresh_tokens
+WHERE token_id = $1;
+`
+	row := s.pool.QueryRow(ctx, q, tokenID)
+	rt := &RefreshToken{}
+	if err := row.Scan(
+		&rt.TokenID, &rt.UserID, &rt.FamilyID,
+		&rt.IssuedAt, &rt.ExpiresAt, &rt.RevokedAt, &rt.ReplacedBy,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrRefreshNotFound
+		}
+		return nil, fmt.Errorf("store: get refresh token: %w", err)
+	}
+	return rt, nil
+}
+
+// ReplaceRefreshToken atomically rotates `oldID` into `newID`. In a
+// single transaction it inserts the new row, then sets the old row's
+// `replaced_by` to the new id. Returns ErrAlreadyRotated if the old
+// row's `replaced_by` was already non-null at start of the transaction
+// (the theft-detection signal).
+func (s *Store) ReplaceRefreshToken(
+	ctx context.Context,
+	oldID, newID, userID, familyID uuid.UUID,
+	expiresAt time.Time,
+) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Lock the old row so concurrent /auth/refresh calls serialize on
+	// the same parent token — only one wins, the other observes
+	// replaced_by != NULL and triggers theft detection.
+	var (
+		replacedBy *uuid.UUID
+		revokedAt  *time.Time
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT replaced_by, revoked_at FROM refresh_tokens WHERE token_id = $1 FOR UPDATE`,
+		oldID,
+	).Scan(&replacedBy, &revokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrRefreshNotFound
+		}
+		return fmt.Errorf("store: lock old token: %w", err)
+	}
+	if replacedBy != nil || revokedAt != nil {
+		return ErrAlreadyRotated
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO refresh_tokens (token_id, user_id, family_id, expires_at)
+		 VALUES ($1, $2, $3, $4)`,
+		newID, userID, familyID, expiresAt,
+	); err != nil {
+		return fmt.Errorf("store: insert new token: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE refresh_tokens SET replaced_by = $1 WHERE token_id = $2`,
+		newID, oldID,
+	); err != nil {
+		return fmt.Errorf("store: mark replaced_by: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+// RevokeRefreshFamily marks every still-active refresh token in the
+// given family as revoked. Used both at logout and after theft is
+// detected. Idempotent.
+func (s *Store) RevokeRefreshFamily(ctx context.Context, userID, familyID uuid.UUID) error {
+	const q = `
+UPDATE refresh_tokens
+SET revoked_at = NOW()
+WHERE user_id = $1 AND family_id = $2 AND revoked_at IS NULL;
+`
+	if _, err := s.pool.Exec(ctx, q, userID, familyID); err != nil {
+		return fmt.Errorf("store: revoke refresh family: %w", err)
+	}
+	return nil
+}
+
+// RecordRevokedJTI records that a particular access-token JTI has been
+// revoked (e.g. at logout). Idempotent — a duplicate insert is not an
+// error.
+func (s *Store) RecordRevokedJTI(ctx context.Context, jti string, userID uuid.UUID) error {
+	const q = `
+INSERT INTO revoked_jti (jti, user_id) VALUES ($1, $2)
+ON CONFLICT (jti) DO NOTHING;
+`
+	if _, err := s.pool.Exec(ctx, q, jti, userID); err != nil {
+		return fmt.Errorf("store: record revoked jti: %w", err)
+	}
+	return nil
+}
+
+// IsJTIRevoked returns true if the given access-token JTI has been
+// recorded as revoked.
+func (s *Store) IsJTIRevoked(ctx context.Context, jti string) (bool, error) {
+	const q = `SELECT 1 FROM revoked_jti WHERE jti = $1;`
+	var one int
+	err := s.pool.QueryRow(ctx, q, jti).Scan(&one)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("store: is jti revoked: %w", err)
+	}
+	return true, nil
 }
 
 // Ping verifies connectivity. Used by /healthz.

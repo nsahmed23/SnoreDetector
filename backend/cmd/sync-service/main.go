@@ -8,8 +8,10 @@
 //   APPLE_AUDIENCE    iOS bundle ID, default "com.snoreguard.app"
 //   APPLE_ISSUER      JWT iss, default "https://appleid.apple.com"
 //   JWT_SIGNING_KEY   ≥32-byte HS256 key for session tokens (required)
-//   JWT_ISSUER        session token iss, default "snoreguard-sync"
-//   JWT_TTL           session token lifetime, default 720h
+//   JWT_ISSUER        access token iss, default "snoreguard-sync"
+//   JWT_REFRESH_ISSUER refresh token iss, default "snoreguard-refresh"
+//   JWT_TTL           access token lifetime, default 1h
+//   JWT_REFRESH_TTL   refresh token lifetime, default 1440h (60d)
 //   LOG_LEVEL         debug|info|warn|error, default info
 //   REQUEST_TIMEOUT   per-request timeout, default 15s
 package main
@@ -73,7 +75,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	jwtIss, err := authjwt.New(cfg.JWTSigningKey, cfg.JWTIssuer, cfg.JWTTTL)
+	jwtIss, err := authjwt.NewWithRefresh(
+		cfg.JWTSigningKey,
+		cfg.JWTIssuer,
+		cfg.JWTRefreshIssuer,
+		cfg.JWTTTL,
+		cfg.JWTRefreshTTL,
+	)
 	if err != nil {
 		return err
 	}

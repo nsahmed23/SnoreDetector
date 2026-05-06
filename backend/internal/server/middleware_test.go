@@ -28,7 +28,7 @@ func TestAuthMiddleware_AcceptsValidToken(t *testing.T) {
 	tok, _ := iss.Issue(uid)
 
 	var seenUser uuid.UUID
-	handler := AuthMiddleware(iss)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(iss, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenUser, _ = UserIDFrom(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -48,7 +48,7 @@ func TestAuthMiddleware_AcceptsValidToken(t *testing.T) {
 
 func TestAuthMiddleware_RejectsMissingHeader(t *testing.T) {
 	iss := newTestIssuer(t)
-	handler := AuthMiddleware(iss)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(iss, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("inner handler should not run")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -61,7 +61,7 @@ func TestAuthMiddleware_RejectsMissingHeader(t *testing.T) {
 
 func TestAuthMiddleware_RejectsBadScheme(t *testing.T) {
 	iss := newTestIssuer(t)
-	handler := AuthMiddleware(iss)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(iss, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("inner handler should not run")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -75,7 +75,7 @@ func TestAuthMiddleware_RejectsBadScheme(t *testing.T) {
 
 func TestAuthMiddleware_RejectsBadToken(t *testing.T) {
 	iss := newTestIssuer(t)
-	handler := AuthMiddleware(iss)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := AuthMiddleware(iss, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("inner handler should not run")
 	}))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
