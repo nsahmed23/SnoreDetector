@@ -1,6 +1,12 @@
+import { memo } from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+// ⚡ Bolt: Wrapped LiveStatsCard in React.memo() to prevent unnecessary re-renders.
+// The RecordTab parent updates its state up to 60 times a second due to the
+// `requestAnimationFrame` audio monitor loop. However, the stats displayed here
+// only change when a snore event concludes. Memoization prevents this expensive
+// DOM component from rendering on every audio frame tick.
+export const LiveStatsCard = memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +47,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
