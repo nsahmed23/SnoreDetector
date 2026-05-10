@@ -1,6 +1,10 @@
 import { HeartPulse } from 'lucide-react';
+import React from 'react';
 
-export function LiveStatsCard({
+// ⚡ Bolt: Added React.memo to prevent unnecessary re-renders.
+// Since this component is inside a parent that updates 60 times a second
+// (due to microphone volume state changes), memoization saves significant DOM diffing.
+export const LiveStatsCard = React.memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +45,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
