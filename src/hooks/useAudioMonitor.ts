@@ -31,28 +31,36 @@ export function useAudioMonitor(
           const source = audioContext.createMediaStreamSource(stream);
           source.connect(analyzer);
           const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+          const midPoint = Math.floor(dataArray.length / 4);
+          const multiplier = sensitivity === 'low' ? 2.0 : sensitivity === 'high' ? 1.2 : 1.5;
 
           const updateVolume = () => {
             if (audioContextRef.current?.state === 'closed') return;
             analyzer.getByteFrequencyData(dataArray);
+
+            // ⚡ Bolt: Combined loops for performance. We calculate total sum, low freq sum, and high freq sum
+            // in a single pass over the frequency data array instead of multiple passes.
+            // This is executed 60 times per second, so O(n) optimizations matter here.
             let sum = 0;
+            let lowFreqSum = 0;
+            let highFreqSum = 0;
+
             for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
+              const val = dataArray[i];
+              sum += val;
+              if (i < midPoint) {
+                lowFreqSum += val;
+              } else {
+                highFreqSum += val;
+              }
             }
+
             const avg = sum / dataArray.length;
 
             // Heuristic: snoring concentrates energy in the lower portion of the spectrum.
             // Compare lower-quarter bins against the rest to separate snoring from broadband noise.
-            let lowFreqSum = 0;
-            let highFreqSum = 0;
-            const midPoint = Math.floor(dataArray.length / 4);
-            for (let i = 0; i < dataArray.length; i++) {
-              if (i < midPoint) lowFreqSum += dataArray[i];
-              else highFreqSum += dataArray[i];
-            }
 
             // Sensitivity multiplier tunes the heuristic's low-frequency dominance ratio.
-            const multiplier = sensitivity === 'low' ? 2.0 : sensitivity === 'high' ? 1.2 : 1.5;
             const isLowFreqDominant = lowFreqSum > highFreqSum * multiplier;
 
             // Map FFT byte-magnitude average to an approximate dB scale (prototype heuristic, not calibrated SPL).
