@@ -1,6 +1,7 @@
+import React from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+export const LiveStatsCard = React.memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +42,5 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
+// ⚡ Bolt: Memoized LiveStatsCard to prevent 60 FPS re-renders driven by volume updates in RecordTab
