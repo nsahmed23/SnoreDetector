@@ -1,6 +1,10 @@
+import React from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+// ⚡ Bolt Optimization: Added React.memo() to prevent unnecessary re-renders
+// Since LiveStatsCard receives props that don't update on every 60fps frame,
+// we can skip rendering this heavy component unless the props actually change.
+export const LiveStatsCard = React.memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +45,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
