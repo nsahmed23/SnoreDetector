@@ -1,0 +1,4 @@
+
+## 2024-05-18 - [Loop Fusion and React.memo in 60fps Audio Apps]
+**Learning:** In audio applications that rely on `requestAnimationFrame` to perform operations at 60fps, it's critical to minimize array iterations and avoid cascading React re-renders. We found two separate loops iterating over the same `Uint8Array` of frequency data in the hot path. Combining them into a single pass (Loop Fusion) significantly reduces CPU overhead. Furthermore, placing static or slow-updating components (like `LiveStatsCard`) inside a rapidly updating component (like `RecordTab` updating its live `volume` meter at 60fps) causes unnecessary re-renders.
+**Action:** Always apply loop fusion in JS hot paths (like `requestAnimationFrame` loops), and wrap slow-updating child components inside `React.memo` to shield them from high-frequency parent re-renders.
