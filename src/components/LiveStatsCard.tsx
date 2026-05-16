@@ -1,6 +1,11 @@
+import { memo } from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+// ⚡ Bolt Optimization:
+// Wrapped in React.memo() to prevent cascading re-renders.
+// The parent RecordTab updates at 60fps, but this child component
+// only needs to re-render when its specific props change.
+export const LiveStatsCard = memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +46,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});

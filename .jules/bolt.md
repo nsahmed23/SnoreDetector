@@ -1,0 +1,3 @@
+## 2024-05-24 - React.memo() on Static Children in Audio Loops
+**Learning:** In components with high-frequency state updates (like `RecordTab` updating 60fps from a `requestAnimationFrame` audio hook), all child components re-render by default. This causes massive unnecessary CPU overhead if the child (like `LiveStatsCard`) only needs to update occasionally.
+**Action:** Always check the update frequency of parent components. If a parent updates continuously (e.g., audio/video processing loops), identify static or infrequently-updating children and wrap them in `React.memo()` to prevent cascading re-renders and save CPU cycles.
