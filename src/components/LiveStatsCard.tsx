@@ -1,6 +1,12 @@
+import React from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+// ⚡ Bolt Optimization:
+// RecordTab re-renders at ~60fps due to the live volume visualizer updating continuously.
+// However, the session stats (snore count, duration, etc.) only update occasionally when a snore finishes.
+// Memoizing this component prevents React from re-rendering this card 60 times a second,
+// which saves CPU cycles and improves the smoothness of the fast-updating volume visualizer.
+export const LiveStatsCard = React.memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +47,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
