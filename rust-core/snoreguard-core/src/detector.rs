@@ -112,24 +112,25 @@ impl Detector {
         self.fft.process(&mut self.scratch);
 
         let bins = FRAME_SIZE / 2;
+        let low_cut = bins / 4;
         let mut total = 0.0f32;
+        let mut low = 0.0f32;
+        let mut high = 0.0f32;
+
+        // ⚡ Bolt: Loop fusion - combining magnitude calculation and frequency band
+        // summation to improve cache locality and avoid redundant array traversal
         for (i, c) in self.scratch.iter().take(bins).enumerate() {
             let m = c.norm();
             self.magnitudes[i] = m;
             total += m;
-        }
-        let avg_mag = total / bins as f32;
 
-        let low_cut = bins / 4;
-        let mut low = 0.0f32;
-        let mut high = 0.0f32;
-        for (i, &m) in self.magnitudes.iter().enumerate() {
             if i < low_cut {
                 low += m;
             } else {
                 high += m;
             }
         }
+        let avg_mag = total / bins as f32;
 
         let mult = self.cfg.sensitivity.dominance_multiplier();
         let low_dominant = low > high * mult;
