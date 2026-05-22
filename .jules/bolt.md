@@ -1,0 +1,3 @@
+## 2024-05-22 - [Loop Fusion in requestAnimationFrame]
+**Learning:** High-frequency rendering and processing loops (like 60fps audio frequency sampling via `requestAnimationFrame` and `getByteFrequencyData`) are extremely sensitive to loop overhead. Multiple passes over the same array data (`dataArray` in this case) to compute different metrics (e.g., total average, low-frequency sum, high-frequency sum) cause redundant iterations.
+**Action:** Apply loop fusion in such high-frequency data extraction paths. Merge multiple calculations over the same data into a single pass to minimize CPU overhead and keep the main thread unblocked.
