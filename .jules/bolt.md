@@ -1,0 +1,3 @@
+## 2025-05-18 - Audio Stream Restart Bottleneck in useEffect
+**Learning:** In React, placing rapidly changing state variables (like boolean tracking states updated inside `requestAnimationFrame`) into a `useEffect` dependency array that manages expensive resource setups (like `AudioContext` and `MediaStream` creation) causes cascading performance issues. It forces a complete teardown and restart of the stream every time the boolean toggles.
+**Action:** Use a `useRef` to track mutable values within closures like high-frequency requestAnimationFrame loops. Keep the state variable for rendering purposes but sync it with the ref, and remove it from the expensive `useEffect` dependency array to prevent unnecessary re-runs.
