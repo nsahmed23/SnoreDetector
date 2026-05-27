@@ -1,0 +1,3 @@
+## 2024-05-27 - Web Audio API Teardown Bottleneck
+**Learning:** Including high-frequency React state variables (like `isCurrentlySnoring`) in a `useEffect` dependency array that manages Web Audio API streams causes expensive cascading teardowns and recreations of the AudioContext. This introduces severe UI stutter and microphone access glitches.
+**Action:** Always track high-frequency mutable state inside Web Audio closures using `useRef` rather than state variables in the dependency array, allowing the continuous 60fps stream to remain uninterrupted while still triggering React state updates for the UI when necessary.
