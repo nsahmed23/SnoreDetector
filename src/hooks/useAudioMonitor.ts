@@ -18,6 +18,12 @@ export function useAudioMonitor(
 
   const activeSnoreFrames = useRef(0);
   const activeSnoreIntensities = useRef<number[]>([]);
+  // Use a ref to track snoring state within the effect closure to avoid adding isCurrentlySnoring to the dependency array
+  const isCurrentlySnoringRef = useRef(isCurrentlySnoring);
+
+  useEffect(() => {
+    isCurrentlySnoringRef.current = isCurrentlySnoring;
+  }, [isCurrentlySnoring]);
 
   useEffect(() => {
     if (isTracking) {
@@ -35,21 +41,19 @@ export function useAudioMonitor(
           const updateVolume = () => {
             if (audioContextRef.current?.state === 'closed') return;
             analyzer.getByteFrequencyData(dataArray);
+            // Optimization: loop fusion to combine multiple passes into a single iteration over dataArray
             let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
-            }
-            const avg = sum / dataArray.length;
-
-            // Heuristic: snoring concentrates energy in the lower portion of the spectrum.
-            // Compare lower-quarter bins against the rest to separate snoring from broadband noise.
             let lowFreqSum = 0;
             let highFreqSum = 0;
             const midPoint = Math.floor(dataArray.length / 4);
+
             for (let i = 0; i < dataArray.length; i++) {
-              if (i < midPoint) lowFreqSum += dataArray[i];
-              else highFreqSum += dataArray[i];
+              const val = dataArray[i];
+              sum += val;
+              if (i < midPoint) lowFreqSum += val;
+              else highFreqSum += val;
             }
+            const avg = sum / dataArray.length;
 
             // Sensitivity multiplier tunes the heuristic's low-frequency dominance ratio.
             const multiplier = sensitivity === 'low' ? 2.0 : sensitivity === 'high' ? 1.2 : 1.5;
@@ -63,11 +67,13 @@ export function useAudioMonitor(
             if (simulatedDb >= thresholdDB && isLowFreqDominant) {
               activeSnoreFrames.current++;
               activeSnoreIntensities.current.push(simulatedDb);
-              if (activeSnoreFrames.current > 15 && !isCurrentlySnoring) {
+              if (activeSnoreFrames.current > 15 && !isCurrentlySnoringRef.current) {
+                isCurrentlySnoringRef.current = true;
                 setIsCurrentlySnoring(true);
               }
             } else {
-              if (isCurrentlySnoring) {
+              if (isCurrentlySnoringRef.current) {
+                isCurrentlySnoringRef.current = false;
                 setIsCurrentlySnoring(false);
                 setSessionSnoreCount(c => c + 1);
 
@@ -108,7 +114,8 @@ export function useAudioMonitor(
         audioContextRef.current.close();
       }
     };
-  }, [isTracking, thresholdDB, isCurrentlySnoring, sensitivity]);
+    // isCurrentlySnoring is intentionally omitted to prevent expensive cascading teardowns of the Web Audio API stream
+  }, [isTracking, thresholdDB, sensitivity]);
 
   return {
     volume,
