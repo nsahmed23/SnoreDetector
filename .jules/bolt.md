@@ -1,0 +1,3 @@
+## 2024-05-31 - [High-Frequency React Render Bottlenecks]
+**Learning:** Components that subscribe to high-frequency continuous data (like 60fps audio volume) cause aggressive cascading re-renders down the React tree. The heuristic loop in `useAudioMonitor` was executing redundant iterations inside the critical 16ms render window, compounding the cost of the frequent re-renders.
+**Action:** Apply Loop Fusion (combine multiple passes over arrays into a single loop) for algorithms running inside `requestAnimationFrame`. Use `React.memo()` on sibling or child components that receive infrequently updated props (like session statistics) to isolate them from the 60fps render cycle of their parent.
