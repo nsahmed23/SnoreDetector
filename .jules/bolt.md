@@ -1,0 +1,3 @@
+## 2025-03-09 - Loop Fusion and Selective Memoization in 60fps Audio Hooks
+**Learning:** High-frequency audio processing loops (like requestAnimationFrame) suffer performance degradation from redundant array iterations and cascading React re-renders. Naive child components of high-frequency components cause unnecessary prop comparisons.
+**Action:** Always apply loop fusion to merge multiple passes over data arrays (e.g., FFT bins). Selectively wrap static or infrequently updating child components in React.memo() when their parent re-renders at 60fps, but avoid memoizing components that receive continuously changing props.
