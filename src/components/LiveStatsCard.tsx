@@ -1,6 +1,9 @@
 import { HeartPulse } from 'lucide-react';
+import { memo } from 'react';
 
-export function LiveStatsCard({
+// ⚡ Bolt Optimization: React.memo() on component receiving infrequently changing props
+// Prevents unnecessary cascading re-renders when parent's 60fps audio loops trigger changes
+export const LiveStatsCard = memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +44,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
