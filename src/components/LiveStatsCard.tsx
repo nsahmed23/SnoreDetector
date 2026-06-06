@@ -1,6 +1,8 @@
+import { memo } from 'react';
 import { HeartPulse } from 'lucide-react';
 
-export function LiveStatsCard({
+// Memoized to prevent re-rendering on every volume update in the parent
+export const LiveStatsCard = memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +43,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
