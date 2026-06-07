@@ -1,0 +1,3 @@
+## 2024-06-07 - [React 60fps Audio Loop Renders]
+**Learning:** High-frequency audio processing loops (like `useAudioMonitor` updating at 60fps via `requestAnimationFrame`) will cause massive cascading React re-renders. A component holding state updated by this loop (like `RecordTab`) forces all its children to re-render constantly.
+**Action:** Always extract and memoize child components that receive static or slowly changing props (like `LiveStatsCard`) using `React.memo` to break the re-render cascade and save CPU. Also apply loop fusion in audio data processing to reduce the work done per frame.
