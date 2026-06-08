@@ -36,20 +36,20 @@ export function useAudioMonitor(
             if (audioContextRef.current?.state === 'closed') return;
             analyzer.getByteFrequencyData(dataArray);
             let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-              sum += dataArray[i];
-            }
-            const avg = sum / dataArray.length;
-
-            // Heuristic: snoring concentrates energy in the lower portion of the spectrum.
-            // Compare lower-quarter bins against the rest to separate snoring from broadband noise.
             let lowFreqSum = 0;
             let highFreqSum = 0;
             const midPoint = Math.floor(dataArray.length / 4);
+
+            // Loop fusion: Compute total sum and low/high frequency sums in a single pass
+            // Heuristic: snoring concentrates energy in the lower portion of the spectrum.
+            // Compare lower-quarter bins against the rest to separate snoring from broadband noise.
             for (let i = 0; i < dataArray.length; i++) {
-              if (i < midPoint) lowFreqSum += dataArray[i];
-              else highFreqSum += dataArray[i];
+              const val = dataArray[i];
+              sum += val;
+              if (i < midPoint) lowFreqSum += val;
+              else highFreqSum += val;
             }
+            const avg = sum / dataArray.length;
 
             // Sensitivity multiplier tunes the heuristic's low-frequency dominance ratio.
             const multiplier = sensitivity === 'low' ? 2.0 : sensitivity === 'high' ? 1.2 : 1.5;

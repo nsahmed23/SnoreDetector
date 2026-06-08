@@ -1,6 +1,9 @@
 import { HeartPulse } from 'lucide-react';
+import { memo } from 'react';
 
-export function LiveStatsCard({
+// Memoize to prevent unnecessary re-renders when parent RecordTab
+// re-renders 60fps due to real-time volume updates
+export const LiveStatsCard = memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +44,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
