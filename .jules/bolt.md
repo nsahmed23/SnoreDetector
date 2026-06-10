@@ -1,0 +1,3 @@
+## 2025-03-01 - [High-Frequency React Optimization]
+ **Learning:** The frontend uses a 60fps `requestAnimationFrame` audio processing loop (`useAudioMonitor.ts`) that triggers frequent state updates (like `volume`), leading to fast re-renders in parent components (`RecordTab`). Without intervention, all children (even those with static or slow-updating data) re-render at 60fps.
+ **Action:** Apply loop fusion to arrays processed inside `requestAnimationFrame` to avoid redundant O(N) operations, and strictly wrap static/infrequently updating children (like `LiveStatsCard`) of fast-updating components in `React.memo()` to prevent cascading performance bottlenecks.
