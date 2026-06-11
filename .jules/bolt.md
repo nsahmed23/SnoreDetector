@@ -1,0 +1,3 @@
+## 2026-06-11 - [Web Audio API Hooks]
+ **Learning:** Placing high-frequency React state variables (like those updated inside `requestAnimationFrame`) into `useEffect` dependency arrays can trigger continuous and expensive teardowns/restarts of hardware APIs like `MediaStream` and `AudioContext`.
+ **Action:** For states needed within a closure without triggering a re-render/re-mount of the `useEffect`, utilize `useRef` to maintain a mutable boolean flag synchronously linked to the React state logic, while keeping the state setter. Ensure loop fusion is also considered to combine array iterations directly inside high-frequency `requestAnimationFrame` loops.
