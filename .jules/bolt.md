@@ -1,0 +1,3 @@
+## 2026-06-12 - Prevent AudioContext Teardowns in 60fps Loop
+**Learning:** Including high-frequency state like `isCurrentlySnoring` in the `useEffect` dependency array for a Web Audio API setup causes massive cascading teardowns and restarts of the `AudioContext` and media streams. This occurs because the `useEffect` cleanup function fires on every state change, resulting in severe performance lag and dropped audio frames.
+**Action:** Always use `useRef` to track high-frequency mutable state inside closures that run within `requestAnimationFrame` loops. Only place static or infrequently updating variables in the main `useEffect` dependency array when setting up persistent API streams like Web Audio or WebRTC.
