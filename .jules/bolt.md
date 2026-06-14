@@ -1,0 +1,3 @@
+## 2026-06-14 - React useEffect Dependencies with High-Frequency Loops
+**Learning:** Including a fast-changing state variable (like `isCurrentlySnoring` updating in a 60fps audio loop) in a `useEffect` dependency array that manages expensive resource setup (like `navigator.mediaDevices.getUserMedia` and `AudioContext`) causes catastrophic performance teardowns and restarts on every state change.
+**Action:** For variables that need to be read or toggled within a high-frequency asynchronous loop (like `requestAnimationFrame`), track them using a `useRef` synchronously alongside the state update, and exclude them from the `useEffect` dependency array to maintain stable closures without unnecessary re-initialization.
