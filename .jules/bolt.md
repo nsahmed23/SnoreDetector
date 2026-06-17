@@ -1,0 +1,3 @@
+## 2025-02-28 - React Audio Visualizer 60fps Optimization
+**Learning:** In audio-monitoring apps using `requestAnimationFrame` for live volume feedback (e.g. 60fps), child components of the fast-updating state node will constantly re-render unless explicitly memoized. Furthermore, standard array iterations for heuristic analysis on each frame become measurable overhead and should be fused into a single loop.
+**Action:** When working on components driven by high-frequency `requestAnimationFrame` or `useEffect` loops, aggressively batch iterations over raw byte arrays (like `Uint8Array` from `AudioContext`) using loop fusion. Wrap non-animated sibling components with `React.memo()` to decouple them from the main thread overhead.
