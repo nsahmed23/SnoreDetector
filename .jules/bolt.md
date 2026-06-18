@@ -1,0 +1,3 @@
+## 2026-06-18 - 60fps Audio Loop React Render Bottleneck
+**Learning:** The application uses a 60fps `requestAnimationFrame` loop in `useAudioMonitor.ts` that continuously updates the `volume` state, causing `RecordTab` to re-render 60 times a second. Static or infrequently-updating child components like `LiveStatsCard` suffer from severe unnecessary re-rendering overhead if not memoized, which can cascade into UI jank. Loop fusion in the audio monitor also avoids redundant array traversals on each frame.
+**Action:** Always wrap infrequently-updating children of fast-updating components (like visualizers) in `React.memo()` and fuse array iterations inside high-frequency processing loops like `requestAnimationFrame`.
