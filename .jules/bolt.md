@@ -1,0 +1,3 @@
+## 2024-06-19 - Avoiding Expensive Web Audio API Teardowns
+**Learning:** Adding a frequently updating state variable (like `isCurrentlySnoring`) to the dependency array of a `useEffect` that initializes `navigator.mediaDevices.getUserMedia` causes the Web Audio API stream to tear down and restart continuously. This completely breaks the 60fps recording loop and drops frames.
+**Action:** Use a `useRef` to track high-frequency synchronous state changes inside closures running in `requestAnimationFrame` and `useEffect` loops to update logic synchronously, avoiding costly teardown-and-restarts when state is updated.
