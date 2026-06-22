@@ -1,0 +1,3 @@
+## 2024-06-22 - Avoid React state in high-frequency MediaStream loops
+**Learning:** Adding reactive state variables (like `isCurrentlySnoring`) to the dependency array of a `useEffect` that initializes `getUserMedia` causes the entire audio stream to tear down, request permissions, and restart every time the state changes. This causes massive performance stuttering and missed events during continuous recording.
+**Action:** Always use `useRef` to track mutable state synchronously within the closure of a high-frequency loop like `requestAnimationFrame` for media processing, updating the reactive state (`useState`) alongside the ref only when the UI needs to re-render, and omitting the reactive state from the `useEffect` dependency array.
