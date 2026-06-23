@@ -1,0 +1,3 @@
+## 2025-03-05 - [High-Frequency React Hook Audio Context Teardowns]
+**Learning:** Including high-frequency state updates (like `isCurrentlySnoring` which flips during detection) inside a Web Audio API `useEffect` dependency array causes catastrophic audio context restarts. This forces the microphone stream and analyzer to constantly teardown and re-initialize, leading to missed frames, double-counting, and broken prototype audio tracking.
+**Action:** Use an internal `useRef` to track high-frequency synchronous state within the `requestAnimationFrame` audio loop alongside the state setter. This ensures the loop accesses the latest value without requiring the effect itself to re-run.
