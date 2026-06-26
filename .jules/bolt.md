@@ -1,0 +1,3 @@
+## 2024-06-26 - Frontend Audio Loop Fusion & React.memo
+**Learning:** In highly frequent updates (like 60fps `requestAnimationFrame` for audio processing), iterating over arrays multiple times creates unneeded CPU overhead. Furthermore, fast-updating parent components cascade renders to children. Memoizing children that don't need 60fps updates (like static event summaries) prevents unnecessary diffing.
+**Action:** Always combine array loops (Loop Fusion) in `requestAnimationFrame` loops, and apply `React.memo` to child components of 60fps-updated parents if their props remain relatively static.
