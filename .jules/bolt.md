@@ -1,0 +1,3 @@
+## 2024-06-27 - [Fix React Effect Cascading Teardowns]
+**Learning:** [Including fast-changing state variables (like high-frequency audio monitoring state `isCurrentlySnoring`) in a `useEffect` dependency array that bootstraps an expensive API (like Web Audio API and MediaStream) creates a severe performance anti-pattern. This causes continuous cascading teardowns and restarts of the media stream which blocks the main thread and ruins application performance.]
+**Action:** [When high-frequency inner-loop logic requires both state tracking and conditional branching inside a complex `useEffect`, use a synchronous `useRef` to drive the logic inside the loop, and only use `useState` to broadcast changes to the UI, keeping the state variable OUT of the dependency array.]
