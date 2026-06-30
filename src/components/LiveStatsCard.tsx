@@ -1,6 +1,10 @@
 import { HeartPulse } from 'lucide-react';
+import React from 'react';
 
-export function LiveStatsCard({
+// ⚡ Bolt: Wrap LiveStatsCard in React.memo to prevent unnecessary re-renders.
+// The parent (RecordTab) renders 60 times a second due to the `volume` state updating from requestAnimationFrame.
+// However, the props passed to this component (e.g. sessionSnoreCount) update very infrequently.
+export const LiveStatsCard = React.memo(function LiveStatsCard({
   sessionSnoreCount,
   sessionAvgIntensity,
   sessionTotalDuration,
@@ -41,4 +45,4 @@ export function LiveStatsCard({
       )}
     </>
   );
-}
+});
