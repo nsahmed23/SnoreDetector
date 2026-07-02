@@ -1,0 +1,3 @@
+## 2024-05-24 - [Avoid Cascading Teardowns in High-Frequency Audio Loops]
+**Learning:** Adding frequently changing React states (`isCurrentlySnoring`) directly to the dependency array of a `useEffect` that establishes Web Audio API contexts causes expensive and continuous resource teardowns and re-initializations, severely degrading performance.
+**Action:** Use a synchronous `useRef` (e.g., `isCurrentlySnoringRef`) within the `requestAnimationFrame` closure to track changing states synchronously alongside calling the state setter. Ensure the changing state is removed from the effect's dependency array so the stream can stay alive continuously.
