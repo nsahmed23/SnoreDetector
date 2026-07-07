@@ -1,0 +1,3 @@
+## 2025-03-05 - [Web Audio API Re-rendering Bottleneck]
+**Learning:** Including fast-changing state (like `isCurrentlySnoring`) in the dependency array of a `useEffect` that initializes the Web Audio API causes the entire stream (`getUserMedia` and `AudioContext`) to be repeatedly torn down and restarted during high-frequency events (60fps updates). This results in massive overhead, dropped frames, and possible race conditions that can break monitoring.
+**Action:** Always extract frequently mutating values into a `useRef` for reading within the event loop to decouple tracking from re-evaluating the underlying hook.
