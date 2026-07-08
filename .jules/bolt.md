@@ -1,0 +1,3 @@
+## 2023-10-27 - [High-Frequency React State in Web Audio Loops]
+**Learning:** Placing rapidly changing boolean state (like `isCurrentlySnoring`) in a `useEffect` dependency array that manages a Web Audio API stream causes catastrophic cascading teardowns. The entire microphone stream and `AudioContext` are destroyed and recreated multiple times a second, ruining performance. Also, `requestAnimationFrame` loops at 60fps benefit greatly from loop fusion when processing audio `Uint8Array`s.
+**Action:** Use a mutable `useRef` to track high-frequency states synchronously inside closures, and only call `setState` for UI rendering. Do NOT put these states in the `useEffect` dependency array if the effect performs expensive setup/teardown. Combine array passes in hot loops.
